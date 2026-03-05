@@ -68,3 +68,49 @@ func TestDaemonStartStop(t *testing.T) {
 		t.Fatalf("Stop() error = %v", err)
 	}
 }
+
+func TestProcessManagerDockerRuntime(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pm := NewProcessManager(logger, 2*time.Second)
+	fake := &fakeDockerRuntime{running: map[string]bool{}}
+	pm.docker = fake
+
+	spec := config.ServiceSpec{
+		Name:    "legacy",
+		Type:    "singleton",
+		Runtime: "docker",
+		Image:   "repo/legacy:latest",
+		Args:    []string{"--mode", "test"},
+	}
+	if err := pm.StartService(context.Background(), spec); err != nil {
+		t.Fatalf("StartService() error = %v", err)
+	}
+	if !pm.IsRunning("legacy") {
+		t.Fatal("expected docker service running")
+	}
+	if err := pm.StopService("legacy"); err != nil {
+		t.Fatalf("StopService() error = %v", err)
+	}
+	if pm.IsRunning("legacy") {
+		t.Fatal("expected docker service stopped")
+	}
+}
+
+type fakeDockerRuntime struct {
+	running map[string]bool
+}
+
+func (f *fakeDockerRuntime) Start(_ context.Context, proc *ManagedProcess) (string, error) {
+	name := "nexus-" + proc.ID
+	f.running[name] = true
+	return name, nil
+}
+
+func (f *fakeDockerRuntime) Stop(container string, _ time.Duration) error {
+	delete(f.running, container)
+	return nil
+}
+
+func (f *fakeDockerRuntime) IsRunning(container string) (bool, error) {
+	return f.running[container], nil
+}

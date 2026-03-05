@@ -29,7 +29,8 @@ type ManagedProcess struct {
 	Spec    config.ServiceSpec
 	Args    []string
 
-	cmd *exec.Cmd
+	cmd           *exec.Cmd
+	containerName string
 }
 
 // ProcessManager starts/stops and tracks service processes.
@@ -38,6 +39,7 @@ type ProcessManager struct {
 	procs    map[string]*ManagedProcess
 	logger   *slog.Logger
 	stopWait time.Duration
+	docker   dockerRuntime
 }
 
 // NewProcessManager creates a process manager.
@@ -46,6 +48,7 @@ func NewProcessManager(logger *slog.Logger, stopWait time.Duration) *ProcessMana
 		procs:    make(map[string]*ManagedProcess),
 		logger:   logger,
 		stopWait: stopWait,
+		docker:   newDockerRuntime(logger),
 	}
 }
 
@@ -111,6 +114,15 @@ func (m *ProcessManager) StopProcess(id string) error {
 	if !ok {
 		return nil
 	}
+	if proc.Spec.Runtime == "docker" {
+		if proc.containerName != "" {
+			if err := m.docker.Stop(proc.containerName, m.stopWait); err != nil {
+				return fmt.Errorf("stop docker %s: %w", id, err)
+			}
+		}
+		m.deleteProcess(id)
+		return nil
+	}
 	if proc.cmd == nil || proc.cmd.Process == nil {
 		m.deleteProcess(id)
 		return nil
@@ -146,7 +158,10 @@ func (m *ProcessManager) States() []ProcessState {
 	for id, p := range m.procs {
 		pid := 0
 		running := false
-		if p.cmd != nil && p.cmd.Process != nil {
+		if p.Spec.Runtime == "docker" {
+			alive, err := m.docker.IsRunning(p.containerName)
+			running = err == nil && alive
+		} else if p.cmd != nil && p.cmd.Process != nil {
 			pid = p.cmd.Process.Pid
 			alive, err := isPIDAlive(pid)
 			running = err == nil && alive
@@ -161,7 +176,14 @@ func (m *ProcessManager) IsRunning(id string) bool {
 	m.mu.RLock()
 	proc, ok := m.procs[id]
 	m.mu.RUnlock()
-	if !ok || proc.cmd == nil || proc.cmd.Process == nil {
+	if !ok {
+		return false
+	}
+	if proc.Spec.Runtime == "docker" {
+		alive, err := m.docker.IsRunning(proc.containerName)
+		return err == nil && alive
+	}
+	if proc.cmd == nil || proc.cmd.Process == nil {
 		return false
 	}
 	alive, err := isPIDAlive(proc.cmd.Process.Pid)
@@ -169,17 +191,27 @@ func (m *ProcessManager) IsRunning(id string) bool {
 }
 
 func (m *ProcessManager) startProcess(ctx context.Context, proc *ManagedProcess) error {
-	if proc.Spec.Runtime != "binary" {
-		// We intentionally reject non-binary runtimes in phase 1 to keep process
-		// lifecycle simple and deterministic; docker runtime is added in phase 4.
-		return fmt.Errorf("service %s runtime %s not supported in process manager", proc.Service, proc.Spec.Runtime)
-	}
-
 	m.mu.RLock()
 	_, exists := m.procs[proc.ID]
 	m.mu.RUnlock()
 	if exists {
 		return fmt.Errorf("process %s already exists", proc.ID)
+	}
+
+	if proc.Spec.Runtime == "docker" {
+		containerName, err := m.docker.Start(ctx, proc)
+		if err != nil {
+			return fmt.Errorf("start docker %s: %w", proc.ID, err)
+		}
+		proc.containerName = containerName
+		m.mu.Lock()
+		m.procs[proc.ID] = proc
+		m.mu.Unlock()
+		m.logger.Info("service process started", "id", proc.ID, "service", proc.Service, "runtime", "docker", "container", containerName)
+		return nil
+	}
+	if proc.Spec.Runtime != "binary" {
+		return fmt.Errorf("service %s runtime %s not supported in process manager", proc.Service, proc.Spec.Runtime)
 	}
 
 	cmd := exec.CommandContext(ctx, proc.Spec.Binary, proc.Args...)
