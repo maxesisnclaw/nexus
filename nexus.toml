@@ -1,0 +1,13 @@
+[daemon]
+socket = "/run/nexus/registry.sock"
+log_level = "info"
+health_interval = "5s"
+shutdown_grace = "10s"
+
+[[service]]
+name = "example"
+type = "singleton"
+runtime = "binary"
+binary = "/bin/sleep"
+args = ["30"]
+network = "uds"
