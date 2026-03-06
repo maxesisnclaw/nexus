@@ -172,6 +172,7 @@ func (m *ProcessManager) StopProcess(id string) error {
 	defer timer.Stop()
 	select {
 	case <-waitCh:
+		m.deleteProcessIfMatch(id, proc)
 		return nil
 	case <-timer.C:
 	}
@@ -228,26 +229,45 @@ func (m *ProcessManager) IsRunning(id string) bool {
 }
 
 func (m *ProcessManager) startProcess(ctx context.Context, proc *ManagedProcess) error {
-	m.mu.RLock()
-	_, exists := m.procs[proc.ID]
-	m.mu.RUnlock()
-	if exists {
+	reservation := &ManagedProcess{
+		ID:      proc.ID,
+		Service: proc.Service,
+		Spec:    proc.Spec,
+		Args:    append([]string(nil), proc.Args...),
+	}
+
+	m.mu.Lock()
+	if _, exists := m.procs[proc.ID]; exists {
+		m.mu.Unlock()
 		return fmt.Errorf("process %s already exists", proc.ID)
 	}
+	m.procs[proc.ID] = reservation
+	m.mu.Unlock()
 
 	if proc.Spec.Runtime == "docker" {
 		containerName, err := m.docker.Start(ctx, proc)
 		if err != nil {
+			m.deleteProcessIfMatch(proc.ID, reservation)
 			return fmt.Errorf("start docker %s: %w", proc.ID, err)
 		}
 		proc.containerName = containerName
+
 		m.mu.Lock()
-		m.procs[proc.ID] = proc
+		current, ok := m.procs[proc.ID]
+		if ok && current == reservation {
+			m.procs[proc.ID] = proc
+		}
 		m.mu.Unlock()
+		if !ok || current != reservation {
+			_ = m.docker.Stop(containerName, m.stopWait)
+			return fmt.Errorf("start process %s canceled during startup", proc.ID)
+		}
+
 		m.logger.Info("service process started", "id", proc.ID, "service", proc.Service, "runtime", "docker", "container", containerName)
 		return nil
 	}
 	if proc.Spec.Runtime != "binary" {
+		m.deleteProcessIfMatch(proc.ID, reservation)
 		return fmt.Errorf("service %s runtime %s not supported in process manager", proc.Service, proc.Spec.Runtime)
 	}
 
@@ -255,14 +275,25 @@ func (m *ProcessManager) startProcess(ctx context.Context, proc *ManagedProcess)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
+		m.deleteProcessIfMatch(proc.ID, reservation)
 		return fmt.Errorf("start process %s: %w", proc.ID, err)
 	}
 	proc.cmd = cmd
 	proc.exited = make(chan struct{})
 
 	m.mu.Lock()
-	m.procs[proc.ID] = proc
+	current, ok := m.procs[proc.ID]
+	if ok && current == reservation {
+		m.procs[proc.ID] = proc
+	}
 	m.mu.Unlock()
+	if !ok || current != reservation {
+		_ = proc.cmd.Process.Signal(syscall.SIGTERM)
+		time.Sleep(100 * time.Millisecond)
+		_ = proc.cmd.Process.Signal(syscall.SIGKILL)
+		_ = cmd.Wait()
+		return fmt.Errorf("start process %s canceled during startup", proc.ID)
+	}
 
 	m.logger.Info("service process started", "id", proc.ID, "service", proc.Service, "pid", cmd.Process.Pid)
 	go func(p *ManagedProcess, c *exec.Cmd, exited chan struct{}) {

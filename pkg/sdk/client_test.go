@@ -574,6 +574,10 @@ func (s *scriptedConn) Close() error {
 	return nil
 }
 
+func (s *scriptedConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+
 func (f *flakyTransport) Dial(_ context.Context, _ transport.ServiceEndpoint) (transport.Conn, error) {
 	f.dials.Add(1)
 	f.mu.Lock()
@@ -647,9 +651,15 @@ func (e *echoConn) Close() error {
 	return nil
 }
 
+func (e *echoConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+
 type blockingConn struct {
 	closed    chan struct{}
 	closeOnce sync.Once
+	mu        sync.Mutex
+	deadline  time.Time
 }
 
 func newBlockingConn() *blockingConn {
@@ -661,8 +671,27 @@ func (b *blockingConn) Send(*transport.Message) error {
 }
 
 func (b *blockingConn) Recv() (*transport.Message, error) {
-	<-b.closed
-	return nil, io.EOF
+	b.mu.Lock()
+	deadline := b.deadline
+	b.mu.Unlock()
+
+	if deadline.IsZero() {
+		<-b.closed
+		return nil, io.EOF
+	}
+
+	wait := time.Until(deadline)
+	if wait <= 0 {
+		return nil, os.ErrDeadlineExceeded
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-b.closed:
+		return nil, io.EOF
+	case <-timer.C:
+		return nil, os.ErrDeadlineExceeded
+	}
 }
 
 func (b *blockingConn) SendFd(int, []byte) error {
@@ -687,6 +716,13 @@ func (b *blockingConn) isClosed() bool {
 	default:
 		return false
 	}
+}
+
+func (b *blockingConn) SetReadDeadline(t time.Time) error {
+	b.mu.Lock()
+	b.deadline = t
+	b.mu.Unlock()
+	return nil
 }
 
 type countingListener struct {

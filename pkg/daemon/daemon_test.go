@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -184,6 +185,53 @@ func TestProcessManagerRollsBackOnDuplicateInstanceID(t *testing.T) {
 	}
 	if states := pm.States(); len(states) != 0 {
 		t.Fatalf("expected rollback cleanup, got states=%+v", states)
+	}
+}
+
+func TestProcessManagerStartProcessRejectsConcurrentDuplicateID(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pm := NewProcessManager(logger, time.Second)
+	procSpec := config.ServiceSpec{
+		Name:    "dup-concurrent",
+		Type:    "singleton",
+		Runtime: "binary",
+		Binary:  "/bin/sleep",
+		Args:    []string{"30"},
+	}
+
+	first := &ManagedProcess{ID: "dup-concurrent", Service: "dup-concurrent", Spec: procSpec, Args: []string{"30"}}
+	second := &ManagedProcess{ID: "dup-concurrent", Service: "dup-concurrent", Spec: procSpec, Args: []string{"30"}}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	results := make(chan error, 2)
+	go func() {
+		defer wg.Done()
+		results <- pm.startProcess(context.Background(), first)
+	}()
+	go func() {
+		defer wg.Done()
+		results <- pm.startProcess(context.Background(), second)
+	}()
+	wg.Wait()
+	close(results)
+
+	var success, failures int
+	for err := range results {
+		if err == nil {
+			success++
+			continue
+		}
+		if !strings.Contains(err.Error(), "already exists") {
+			t.Fatalf("unexpected startProcess() error: %v", err)
+		}
+		failures++
+	}
+	if success != 1 || failures != 1 {
+		t.Fatalf("expected one success and one duplicate failure, got success=%d failures=%d", success, failures)
+	}
+	if err := pm.StopProcess("dup-concurrent"); err != nil {
+		t.Fatalf("StopProcess() error = %v", err)
 	}
 }
 

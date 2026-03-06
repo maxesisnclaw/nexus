@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 var (
@@ -45,6 +46,7 @@ type Conn interface {
 	Recv() (*Message, error)
 	SendFd(fd int, metadata []byte) error
 	RecvFd() (fd int, metadata []byte, err error)
+	SetReadDeadline(t time.Time) error
 	Close() error
 }
 

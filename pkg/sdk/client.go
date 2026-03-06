@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"os"
 	"sync"
 	"syscall"
 	"time"
@@ -370,23 +372,27 @@ func (c *Client) recvWithTimeout(conn transport.Conn) (*transport.Message, error
 	if c.cfg.ServeTimeout <= 0 {
 		return conn.Recv()
 	}
-	type recvResult struct {
-		msg *transport.Message
-		err error
+
+	deadline := time.Now().Add(c.cfg.ServeTimeout)
+	if err := conn.SetReadDeadline(deadline); err != nil {
+		return nil, err
 	}
-	resultCh := make(chan recvResult, 1)
-	go func() {
-		msg, err := conn.Recv()
-		resultCh <- recvResult{msg: msg, err: err}
+	defer func() {
+		_ = conn.SetReadDeadline(time.Time{})
 	}()
-	timer := time.NewTimer(c.cfg.ServeTimeout)
-	defer timer.Stop()
-	select {
-	case result := <-resultCh:
-		return result.msg, result.err
-	case <-timer.C:
-		return nil, errors.New("receive timeout")
+
+	msg, err := conn.Recv()
+	if err != nil {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return nil, errors.New("receive timeout")
+		}
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			return nil, errors.New("receive timeout")
+		}
+		return nil, err
 	}
+	return msg, nil
 }
 
 func (c *Client) dispatch(req *Request) (*Response, error) {

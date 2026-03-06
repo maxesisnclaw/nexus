@@ -3,15 +3,17 @@ package transport
 import (
 	"net"
 	"sync"
+	"time"
 
 	"github.com/vmihailenco/msgpack/v5"
 )
 
 type msgpackConn struct {
-	raw net.Conn
-	enc *msgpack.Encoder
-	dec *msgpack.Decoder
-	mu  sync.Mutex
+	raw    net.Conn
+	enc    *msgpack.Encoder
+	dec    *msgpack.Decoder
+	sendMu sync.Mutex
+	recvMu sync.Mutex
 }
 
 func newMsgpackConn(c net.Conn) *msgpackConn {
@@ -23,17 +25,24 @@ func newMsgpackConn(c net.Conn) *msgpackConn {
 }
 
 func (c *msgpackConn) Send(msg *Message) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
 	return c.enc.Encode(msg)
 }
 
 func (c *msgpackConn) Recv() (*Message, error) {
+	c.recvMu.Lock()
+	defer c.recvMu.Unlock()
+
 	var m Message
 	if err := c.dec.Decode(&m); err != nil {
 		return nil, err
 	}
 	return &m, nil
+}
+
+func (c *msgpackConn) SetReadDeadline(t time.Time) error {
+	return c.raw.SetReadDeadline(t)
 }
 
 func (c *msgpackConn) Close() error {

@@ -267,7 +267,10 @@ func (f *fakeConn) Send(*Message) error          { return nil }
 func (f *fakeConn) Recv() (*Message, error)      { return &Message{}, nil }
 func (f *fakeConn) SendFd(int, []byte) error     { return nil }
 func (f *fakeConn) RecvFd() (int, []byte, error) { return -1, nil, nil }
-func (f *fakeConn) Close() error                 { return nil }
+func (f *fakeConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+func (f *fakeConn) Close() error { return nil }
 
 func errUnexpectedMethod(got string) error { return &methodErr{got: got} }
 
