@@ -44,8 +44,10 @@ func (h *HealthMonitor) Run(ctx context.Context) {
 
 func (h *HealthMonitor) checkOnce(ctx context.Context) {
 	states := h.manager.States()
+	active := make(map[string]struct{}, len(states))
 	now := time.Now()
 	for _, st := range states {
+		active[st.ID] = struct{}{}
 		if !st.Running {
 			h.logger.Warn("process unhealthy", "id", st.ID, "service", st.Service, "pid", st.PID)
 			if h.shouldRestart(st.ID, now) {
@@ -59,6 +61,11 @@ func (h *HealthMonitor) checkOnce(ctx context.Context) {
 		}
 		delete(h.restart, st.ID)
 		h.logger.Debug("process healthy", "id", st.ID, "service", st.Service, "pid", st.PID)
+	}
+	for id := range h.restart {
+		if _, ok := active[id]; !ok {
+			delete(h.restart, id)
+		}
 	}
 }
 

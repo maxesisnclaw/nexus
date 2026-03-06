@@ -438,6 +438,55 @@ func TestCloseUsesSyncOnce(t *testing.T) {
 	}
 }
 
+func TestCloseClosesOwnedRegistry(t *testing.T) {
+	client, err := New(Config{Name: "svc-owned"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if !client.ownsReg {
+		t.Fatal("expected client to own auto-created registry")
+	}
+
+	reg := client.registry
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reg.Register(registry.ServiceInstance{
+		Name: "svc-owned",
+		ID:   "owned-ephemeral",
+		TTL:  20 * time.Millisecond,
+	})
+	time.Sleep(1200 * time.Millisecond)
+	if got := len(reg.Lookup("svc-owned")); got != 1 {
+		t.Fatalf("expected owned registry reaper to be stopped after Close(), got %d instances", got)
+	}
+}
+
+func TestCloseDoesNotCloseExternalRegistry(t *testing.T) {
+	reg := registry.NewWithOptions("node-a", 50*time.Millisecond, 10*time.Millisecond)
+	defer reg.Close()
+
+	client, err := New(Config{Name: "svc-external", Registry: reg})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if client.ownsReg {
+		t.Fatal("expected client to not own external registry")
+	}
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reg.Register(registry.ServiceInstance{
+		Name: "svc-external",
+		ID:   "external-ephemeral",
+		TTL:  30 * time.Millisecond,
+	})
+	waitForServiceGone(t, reg, "svc-external")
+}
+
 func TestListenTCPAndDualRegister(t *testing.T) {
 	reg := registry.New("node-a")
 	defer reg.Close()
@@ -499,6 +548,18 @@ func waitForService(t *testing.T, reg *registry.Registry, name string, want int)
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("service %s did not reach %d instances", name, want)
+}
+
+func waitForServiceGone(t *testing.T, reg *registry.Registry, name string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if got := len(reg.Lookup(name)); got == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("service %s did not expire from registry", name)
 }
 
 func testSocketPath(t *testing.T, prefix string) string {

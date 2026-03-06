@@ -73,6 +73,12 @@ func (r *Registry) notify(name string, event ChangeEvent) {
 	}
 	r.mu.RUnlock()
 	for _, cb := range callbacks {
-		cb(event)
+		cb := cb
+		go func() {
+			defer func() {
+				_ = recover()
+			}()
+			cb(event)
+		}()
 	}
 }

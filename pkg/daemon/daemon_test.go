@@ -334,6 +334,51 @@ func TestHealthMonitorRestartsUnhealthyProcess(t *testing.T) {
 	}
 }
 
+func TestHealthMonitorCleansStaleRestartEntries(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pm := NewProcessManager(logger, time.Second)
+	h := NewHealthMonitor(logger, pm, 100*time.Millisecond)
+	h.restart["stale"] = time.Now().Add(-time.Minute)
+
+	h.checkOnce(context.Background())
+
+	if len(h.restart) != 0 {
+		t.Fatalf("expected stale restart map to be cleaned, got %+v", h.restart)
+	}
+}
+
+func TestHealthMonitorKeepsRestartStateForActiveProcess(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pm := NewProcessManager(logger, time.Second)
+	pm.docker = &fakeDockerRuntime{
+		running: map[string]bool{
+			"nexus-worker": false,
+		},
+	}
+	pm.procs["worker"] = &ManagedProcess{
+		ID:            "worker",
+		Service:       "worker",
+		Spec:          config.ServiceSpec{Name: "worker", Runtime: "docker", Image: "repo/worker:latest"},
+		containerName: "nexus-worker",
+	}
+
+	h := NewHealthMonitor(logger, pm, time.Second)
+	h.restart["worker"] = time.Now()
+	h.restart["stale"] = time.Now().Add(-time.Minute)
+
+	h.checkOnce(context.Background())
+
+	if _, ok := h.restart["stale"]; ok {
+		t.Fatalf("expected stale restart entry to be removed, got %+v", h.restart)
+	}
+	if _, ok := h.restart["worker"]; !ok {
+		t.Fatalf("expected active restart entry to be preserved, got %+v", h.restart)
+	}
+	if pm.IsRunning("worker") {
+		t.Fatal("expected restart throttle to prevent immediate restart")
+	}
+}
+
 func TestProcessManagerStopServiceAggregatesErrors(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	pm := NewProcessManager(logger, time.Second)

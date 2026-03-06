@@ -62,6 +62,7 @@ type Client struct {
 	cfg       Config
 	logger    *slog.Logger
 	registry  *registry.Registry
+	ownsReg   bool
 	discovery *registry.Discovery
 	router    *transport.Router
 
@@ -101,8 +102,10 @@ func New(cfg Config) (*Client, error) {
 	if cfg.Network == "" {
 		cfg.Network = "uds"
 	}
+	ownsReg := false
 	if cfg.Registry == nil {
 		cfg.Registry = registry.New("local")
+		ownsReg = true
 	}
 	if cfg.Router == nil {
 		cfg.Router = transport.NewRouter(transport.NewUDSTransport(), transport.NewTCPTransport())
@@ -116,6 +119,7 @@ func New(cfg Config) (*Client, error) {
 		cfg:       cfg,
 		logger:    logger,
 		registry:  cfg.Registry,
+		ownsReg:   ownsReg,
 		discovery: registry.NewDiscovery(cfg.Registry),
 		router:    cfg.Router,
 		handlers:  make(map[string]Handler),
@@ -276,6 +280,9 @@ func (c *Client) Close() error {
 		if c.listener != nil {
 			c.closeErr = c.listener.Close()
 			c.listener = nil
+		}
+		if c.ownsReg {
+			c.registry.Close()
 		}
 	})
 	return c.closeErr

@@ -128,13 +128,95 @@ func TestUnregisterAndUnsubscribe(t *testing.T) {
 	unsub()
 	r.Register(ServiceInstance{Name: "svc", ID: "svc-2"})
 
-	close(events)
-	var got []ChangeType
-	for ev := range events {
-		got = append(got, ev.Type)
+	got := make([]ChangeEvent, 0, 2)
+	for i := 0; i < 2; i++ {
+		select {
+		case ev := <-events:
+			got = append(got, ev)
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for watch event %d", i)
+		}
 	}
-	if len(got) != 2 || got[0] != ChangeUp || got[1] != ChangeDown {
+	var up, down bool
+	for _, ev := range got {
+		if ev.Instance.ID != "svc-1" {
+			t.Fatalf("unexpected event instance: %+v", ev)
+		}
+		if ev.Type == ChangeUp {
+			up = true
+		}
+		if ev.Type == ChangeDown {
+			down = true
+		}
+	}
+	if !up || !down {
 		t.Fatalf("unexpected watch event sequence: %+v", got)
+	}
+	select {
+	case ev := <-events:
+		t.Fatalf("unexpected event after unsubscribe: %+v", ev)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestWatchPanicDoesNotBreakDelivery(t *testing.T) {
+	r := NewWithOptions("node-a", 200*time.Millisecond, 20*time.Millisecond)
+	defer r.Close()
+
+	events := make(chan ChangeEvent, 1)
+	r.Watch("svc", func(ChangeEvent) {
+		panic("watcher panic")
+	})
+	r.Watch("svc", func(ev ChangeEvent) {
+		events <- ev
+	})
+
+	r.Register(ServiceInstance{Name: "svc", ID: "svc-1"})
+
+	select {
+	case ev := <-events:
+		if ev.Type != ChangeUp || ev.Instance.ID != "svc-1" {
+			t.Fatalf("unexpected event: %+v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for non-panicking watcher event")
+	}
+}
+
+func TestWatchBlockedCallbackDoesNotBlockOthers(t *testing.T) {
+	r := NewWithOptions("node-a", 200*time.Millisecond, 20*time.Millisecond)
+	defer r.Close()
+
+	block := make(chan struct{})
+	defer close(block)
+
+	events := make(chan ChangeEvent, 1)
+	r.Watch("svc", func(ChangeEvent) {
+		<-block
+	})
+	r.Watch("svc", func(ev ChangeEvent) {
+		events <- ev
+	})
+
+	done := make(chan struct{})
+	go func() {
+		r.Register(ServiceInstance{Name: "svc", ID: "svc-1"})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("register blocked by watcher callback")
+	}
+
+	select {
+	case ev := <-events:
+		if ev.Type != ChangeUp || ev.Instance.ID != "svc-1" {
+			t.Fatalf("unexpected event: %+v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for unblocked watcher")
 	}
 }
 
