@@ -16,6 +16,7 @@ import (
 
 const (
 	fdCallMethod = "__nexus_fd_call__"
+	fdReadyKey   = "ready_fd"
 )
 
 // Config controls SDK client behavior.
@@ -179,6 +180,10 @@ func (c *Client) callOnce(serviceName, method string, payload []byte, preferFD b
 	if err := conn.Send(setup); err != nil {
 		return c.callOnce(serviceName, method, payload, false)
 	}
+	ack, err := conn.Recv()
+	if err != nil || ack.Headers[fdReadyKey] != "1" {
+		return c.callOnce(serviceName, method, payload, false)
+	}
 	if err := conn.SendFd(fd, []byte("fd")); err != nil {
 		return c.callOnce(serviceName, method, payload, false)
 	}
@@ -315,6 +320,9 @@ func (c *Client) serveConn(conn transport.Conn) {
 		}
 		req := &Request{Method: msg.Method, Payload: msg.Payload, Headers: msg.Headers}
 		if msg.Method == fdCallMethod {
+			if err := conn.Send(&transport.Message{Method: fdCallMethod, Headers: map[string]string{fdReadyKey: "1"}}); err != nil {
+				return
+			}
 			fd, _, err := conn.RecvFd()
 			if err != nil {
 				_ = conn.Send(&transport.Message{Headers: map[string]string{"error": err.Error()}})

@@ -298,7 +298,7 @@ func TestServeConnErrorHandling(t *testing.T) {
 	}
 	client.serveConn(conn)
 
-	if len(conn.sent) != 5 {
+	if len(conn.sent) != 7 {
 		t.Fatalf("unexpected sent message count: %d", len(conn.sent))
 	}
 	if conn.sent[0].Headers["error"] == "" {
@@ -310,11 +310,17 @@ func TestServeConnErrorHandling(t *testing.T) {
 	if string(conn.sent[2].Payload) != "v" {
 		t.Fatalf("unexpected success payload: %q", string(conn.sent[2].Payload))
 	}
-	if conn.sent[3].Headers["error"] == "" {
-		t.Fatalf("expected recv fd error response, got %+v", conn.sent[3])
+	if conn.sent[3].Headers[fdReadyKey] != "1" {
+		t.Fatalf("expected fd ready ack, got %+v", conn.sent[3])
 	}
 	if conn.sent[4].Headers["error"] == "" {
-		t.Fatalf("expected read fd error response, got %+v", conn.sent[4])
+		t.Fatalf("expected recv fd error response, got %+v", conn.sent[4])
+	}
+	if conn.sent[5].Headers[fdReadyKey] != "1" {
+		t.Fatalf("expected second fd ready ack, got %+v", conn.sent[5])
+	}
+	if conn.sent[6].Headers["error"] == "" {
+		t.Fatalf("expected read fd error response, got %+v", conn.sent[6])
 	}
 }
 
