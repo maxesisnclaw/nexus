@@ -55,10 +55,15 @@ func NewProcessManager(logger *slog.Logger, stopWait time.Duration) *ProcessMana
 // StartService starts one service and all configured instances.
 func (m *ProcessManager) StartService(ctx context.Context, spec config.ServiceSpec) error {
 	instances := expandInstances(spec)
+	startedIDs := make([]string, 0, len(instances))
 	for _, inst := range instances {
 		if err := m.startProcess(ctx, inst); err != nil {
+			for i := len(startedIDs) - 1; i >= 0; i-- {
+				_ = m.StopProcess(startedIDs[i])
+			}
 			return err
 		}
+		startedIDs = append(startedIDs, inst.ID)
 	}
 	return nil
 }
@@ -73,12 +78,13 @@ func (m *ProcessManager) StopService(serviceName string) error {
 		}
 	}
 	m.mu.RUnlock()
+	var joined error
 	for _, id := range ids {
 		if err := m.StopProcess(id); err != nil {
-			return err
+			joined = errors.Join(joined, err)
 		}
 	}
-	return nil
+	return joined
 }
 
 // RestartService restarts every process under a service name.
@@ -227,10 +233,15 @@ func (m *ProcessManager) startProcess(ctx context.Context, proc *ManagedProcess)
 	m.mu.Unlock()
 
 	m.logger.Info("service process started", "id", proc.ID, "service", proc.Service, "pid", cmd.Process.Pid)
-	go func(id string, c *exec.Cmd) {
-		_ = c.Wait()
-		m.logger.Info("service process exited", "id", id)
-	}(proc.ID, cmd)
+	go func(p *ManagedProcess, c *exec.Cmd) {
+		err := c.Wait()
+		if err != nil {
+			m.logger.Warn("service process exited with error", "id", p.ID, "err", err)
+		} else {
+			m.logger.Info("service process exited", "id", p.ID)
+		}
+		m.deleteProcessIfMatch(p.ID, p)
+	}(proc, cmd)
 	return nil
 }
 
@@ -240,19 +251,33 @@ func (m *ProcessManager) deleteProcess(id string) {
 	delete(m.procs, id)
 }
 
+func (m *ProcessManager) deleteProcessIfMatch(id string, expected *ManagedProcess) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, ok := m.procs[id]
+	if !ok || current != expected {
+		return
+	}
+	delete(m.procs, id)
+}
+
 func expandInstances(spec config.ServiceSpec) []*ManagedProcess {
 	if spec.Type == "worker" && len(spec.Instances) > 0 {
 		out := make([]*ManagedProcess, 0, len(spec.Instances))
-		for _, inst := range spec.Instances {
+		for i, inst := range spec.Instances {
 			args := spec.Args
 			if len(inst.Args) > 0 {
 				args = inst.Args
 			}
-			out = append(out, &ManagedProcess{ID: inst.ID, Service: spec.Name, Spec: spec, Args: args})
+			id := inst.ID
+			if id == "" {
+				id = fmt.Sprintf("%s-%d", spec.Name, i)
+			}
+			out = append(out, &ManagedProcess{ID: id, Service: spec.Name, Spec: spec, Args: append([]string(nil), args...)})
 		}
 		return out
 	}
-	return []*ManagedProcess{{ID: spec.Name, Service: spec.Name, Spec: spec, Args: spec.Args}}
+	return []*ManagedProcess{{ID: spec.Name, Service: spec.Name, Spec: spec, Args: append([]string(nil), spec.Args...)}}
 }
 
 func isPIDAlive(pid int) (bool, error) {

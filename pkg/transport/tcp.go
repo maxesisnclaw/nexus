@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"time"
 )
 
 // TCPTransport implements TCP transport.
@@ -28,7 +29,11 @@ func (t *TCPTransport) Dial(ctx context.Context, target ServiceEndpoint) (Conn, 
 }
 
 func (t *TCPTransport) Listen(_ context.Context, addr string) (Listener, error) {
-	ln, err := net.Listen("tcp", addr)
+	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("resolve tcp address %s: %w", addr, err)
+	}
+	ln, err := net.ListenTCP("tcp", tcpAddr)
 	if err != nil {
 		return nil, fmt.Errorf("tcp listen %s: %w", addr, err)
 	}
@@ -36,15 +41,34 @@ func (t *TCPTransport) Listen(_ context.Context, addr string) (Listener, error) 
 }
 
 type tcpListener struct {
-	ln net.Listener
+	ln *net.TCPListener
 }
 
-func (l *tcpListener) Accept(_ context.Context) (Conn, error) {
-	c, err := l.ln.Accept()
-	if err != nil {
-		return nil, err
+func (l *tcpListener) Accept(ctx context.Context) (Conn, error) {
+	for {
+		if err := l.ln.SetDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
+			return nil, err
+		}
+		c, err := l.ln.AcceptTCP()
+		if err == nil {
+			return &tcpConn{msgpackConn: newMsgpackConn(c)}, nil
+		}
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+				continue
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+			return nil, err
+		}
 	}
-	return &tcpConn{msgpackConn: newMsgpackConn(c)}, nil
 }
 
 func (l *tcpListener) Close() error {

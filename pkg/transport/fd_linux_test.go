@@ -3,6 +3,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"testing"
@@ -73,5 +74,40 @@ func TestUDSSendRecvFD(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for fd receive")
+	}
+}
+
+func TestCreateMemfdAndReadFDAll(t *testing.T) {
+	payload := bytes.Repeat([]byte("p"), 1024)
+	fd, err := CreateMemfd("unit-test", payload)
+	if err != nil {
+		t.Fatalf("CreateMemfd() error = %v", err)
+	}
+	defer unix.Close(fd)
+
+	got, err := ReadFDAll(fd)
+	if err != nil {
+		t.Fatalf("ReadFDAll() error = %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("payload mismatch: got=%d want=%d", len(got), len(payload))
+	}
+}
+
+func TestReadFDAllInvalidFD(t *testing.T) {
+	if _, err := ReadFDAll(-1); err == nil {
+		t.Fatal("expected invalid fd error")
+	}
+}
+
+func TestSendRecvFDNilConnErrors(t *testing.T) {
+	if err := sendFD(nil, 1, []byte("x")); err == nil {
+		t.Fatal("expected sendFD nil conn error")
+	}
+	if _, _, err := recvFD(nil); err == nil {
+		t.Fatal("expected recvFD nil conn error")
+	}
+	if err := sendFD(nil, -1, nil); err == nil {
+		t.Fatal("expected sendFD invalid fd error")
 	}
 }

@@ -116,3 +116,51 @@ func TestDiscoveryPickRoundRobin(t *testing.T) {
 		t.Fatalf("expected round robin picks to differ, first=%s second=%s", first.ID, second.ID)
 	}
 }
+
+func TestUnregisterAndUnsubscribe(t *testing.T) {
+	r := NewWithOptions("node-a", 200*time.Millisecond, 20*time.Millisecond)
+	defer r.Close()
+
+	events := make(chan ChangeEvent, 4)
+	unsub := r.Watch("svc", func(ev ChangeEvent) { events <- ev })
+	r.Register(ServiceInstance{Name: "svc", ID: "svc-1"})
+	r.Unregister("svc-1")
+	unsub()
+	r.Register(ServiceInstance{Name: "svc", ID: "svc-2"})
+
+	close(events)
+	var got []ChangeType
+	for ev := range events {
+		got = append(got, ev.Type)
+	}
+	if len(got) != 2 || got[0] != ChangeUp || got[1] != ChangeDown {
+		t.Fatalf("unexpected watch event sequence: %+v", got)
+	}
+}
+
+func TestSnapshotSorted(t *testing.T) {
+	r := NewWithOptions("node-a", time.Second, 100*time.Millisecond)
+	defer r.Close()
+
+	r.Register(ServiceInstance{Name: "svc", ID: "b"})
+	r.Register(ServiceInstance{Name: "svc", ID: "a"})
+	snapshot := r.Snapshot()
+	if len(snapshot) != 2 {
+		t.Fatalf("unexpected snapshot length: %d", len(snapshot))
+	}
+	if snapshot[0].ID != "a" || snapshot[1].ID != "b" {
+		t.Fatalf("snapshot should be sorted by ID, got %+v", snapshot)
+	}
+}
+
+func TestDiscoveryErrors(t *testing.T) {
+	r := NewWithOptions("node-a", time.Second, 100*time.Millisecond)
+	defer r.Close()
+	d := NewDiscovery(r)
+	if _, err := d.Pick("missing"); err == nil {
+		t.Fatal("expected Pick error for missing service")
+	}
+	if _, err := d.PickByCapability("missing-cap"); err == nil {
+		t.Fatal("expected PickByCapability error for missing capability")
+	}
+}

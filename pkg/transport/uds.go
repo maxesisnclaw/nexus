@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // UDSTransport implements unix domain socket transport.
@@ -44,7 +45,11 @@ func (t *UDSTransport) Listen(_ context.Context, addr string) (Listener, error) 
 	if err := os.Remove(addr); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("cleanup stale socket: %w", err)
 	}
-	ln, err := net.Listen("unix", addr)
+	unixAddr, err := net.ResolveUnixAddr("unix", addr)
+	if err != nil {
+		return nil, fmt.Errorf("resolve uds address %s: %w", addr, err)
+	}
+	ln, err := net.ListenUnix("unix", unixAddr)
 	if err != nil {
 		return nil, fmt.Errorf("uds listen %s: %w", addr, err)
 	}
@@ -52,21 +57,35 @@ func (t *UDSTransport) Listen(_ context.Context, addr string) (Listener, error) 
 }
 
 type udsListener struct {
-	ln   net.Listener
+	ln   *net.UnixListener
 	path string
 }
 
-func (l *udsListener) Accept(_ context.Context) (Conn, error) {
-	c, err := l.ln.Accept()
-	if err != nil {
-		return nil, err
+func (l *udsListener) Accept(ctx context.Context) (Conn, error) {
+	for {
+		if err := l.ln.SetDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
+			return nil, err
+		}
+		uc, err := l.ln.AcceptUnix()
+		if err == nil {
+			return &udsConn{msgpackConn: newMsgpackConn(uc), unixConn: uc}, nil
+		}
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+				continue
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+			return nil, err
+		}
 	}
-	uc, ok := c.(*net.UnixConn)
-	if !ok {
-		_ = c.Close()
-		return nil, errors.New("not a unix connection")
-	}
-	return &udsConn{msgpackConn: newMsgpackConn(uc), unixConn: uc}, nil
 }
 
 func (l *udsListener) Close() error {

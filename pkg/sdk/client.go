@@ -28,6 +28,8 @@ type Config struct {
 	Network               string
 	RequestTimeout        time.Duration
 	LargePayloadThreshold int
+	CallRetries           int
+	RetryBackoff          time.Duration
 	Registry              *registry.Registry
 	Router                *transport.Router
 	Logger                *slog.Logger
@@ -79,6 +81,12 @@ func New(cfg Config) (*Client, error) {
 	if cfg.LargePayloadThreshold <= 0 {
 		cfg.LargePayloadThreshold = 1 << 20
 	}
+	if cfg.RetryBackoff <= 0 {
+		cfg.RetryBackoff = 100 * time.Millisecond
+	}
+	if cfg.CallRetries < 0 {
+		cfg.CallRetries = 0
+	}
 	if cfg.Network == "" {
 		cfg.Network = "uds"
 	}
@@ -113,6 +121,34 @@ func (c *Client) Handle(method string, handler Handler) {
 
 // Call invokes a method on one service instance picked by discovery.
 func (c *Client) Call(serviceName, method string, payload []byte) (*Response, error) {
+	return c.callWithRetry(serviceName, method, payload, false)
+}
+
+// CallWithData attempts fd-based transfer on local UDS and falls back to Call.
+func (c *Client) CallWithData(serviceName, method string, payload []byte) (*Response, error) {
+	if len(payload) < c.cfg.LargePayloadThreshold {
+		return c.callWithRetry(serviceName, method, payload, false)
+	}
+	return c.callWithRetry(serviceName, method, payload, true)
+}
+
+func (c *Client) callWithRetry(serviceName, method string, payload []byte, preferFD bool) (*Response, error) {
+	var lastErr error
+	for attempt := 0; attempt <= c.cfg.CallRetries; attempt++ {
+		resp, err := c.callOnce(serviceName, method, payload, preferFD)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if attempt == c.cfg.CallRetries {
+			break
+		}
+		time.Sleep(c.cfg.RetryBackoff)
+	}
+	return nil, lastErr
+}
+
+func (c *Client) callOnce(serviceName, method string, payload []byte, preferFD bool) (*Response, error) {
 	inst, err := c.discovery.Pick(serviceName)
 	if err != nil {
 		return nil, err
@@ -123,15 +159,28 @@ func (c *Client) Call(serviceName, method string, payload []byte) (*Response, er
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.RequestTimeout)
 	defer cancel()
-
 	conn, err := c.router.Dial(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
 
-	if err := conn.Send(&transport.Message{Method: method, Payload: payload}); err != nil {
-		return nil, err
+	if !preferFD {
+		return c.callMsgpack(conn, method, payload)
+	}
+
+	fd, err := transport.CreateMemfd("nexus-call", payload)
+	if err != nil {
+		return c.callMsgpack(conn, method, payload)
+	}
+	defer syscall.Close(fd)
+
+	setup := &transport.Message{Method: fdCallMethod, Headers: map[string]string{"method": method}}
+	if err := conn.Send(setup); err != nil {
+		return c.callOnce(serviceName, method, payload, false)
+	}
+	if err := conn.SendFd(fd, []byte("fd")); err != nil {
+		return c.callOnce(serviceName, method, payload, false)
 	}
 	resp, err := conn.Recv()
 	if err != nil {
@@ -143,39 +192,9 @@ func (c *Client) Call(serviceName, method string, payload []byte) (*Response, er
 	return &Response{Payload: resp.Payload, Headers: resp.Headers}, nil
 }
 
-// CallWithData attempts fd-based transfer on local UDS and falls back to Call.
-func (c *Client) CallWithData(serviceName, method string, payload []byte) (*Response, error) {
-	if len(payload) < c.cfg.LargePayloadThreshold {
-		return c.Call(serviceName, method, payload)
-	}
-	inst, err := c.discovery.Pick(serviceName)
-	if err != nil {
+func (c *Client) callMsgpack(conn transport.Conn, method string, payload []byte) (*Response, error) {
+	if err := conn.Send(&transport.Message{Method: method, Payload: payload}); err != nil {
 		return nil, err
-	}
-	endpoint, err := endpointFromInstance(inst)
-	if err != nil {
-		return nil, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.RequestTimeout)
-	defer cancel()
-	conn, err := c.router.Dial(ctx, endpoint)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-
-	fd, err := transport.CreateMemfd("nexus-call", payload)
-	if err != nil {
-		return c.Call(serviceName, method, payload)
-	}
-	defer syscall.Close(fd)
-
-	setup := &transport.Message{Method: fdCallMethod, Headers: map[string]string{"method": method}}
-	if err := conn.Send(setup); err != nil {
-		return nil, err
-	}
-	if err := conn.SendFd(fd, []byte("fd")); err != nil {
-		return c.Call(serviceName, method, payload)
 	}
 	resp, err := conn.Recv()
 	if err != nil {

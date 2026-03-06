@@ -6,7 +6,9 @@ import "time"
 type EndpointType string
 
 const (
+	// EndpointUDS indicates a Unix domain socket endpoint.
 	EndpointUDS EndpointType = "uds"
+	// EndpointTCP indicates a TCP endpoint.
 	EndpointTCP EndpointType = "tcp"
 )
 
@@ -32,7 +34,9 @@ type ServiceInstance struct {
 type ChangeType string
 
 const (
-	ChangeUp   ChangeType = "up"
+	// ChangeUp signals an instance registration/update event.
+	ChangeUp ChangeType = "up"
+	// ChangeDown signals an instance removal/expiry event.
 	ChangeDown ChangeType = "down"
 )
 

@@ -62,12 +62,21 @@ func NewRouter(uds, tcp Transport) *Router {
 // Dial picks the best transport for the endpoint.
 func (r *Router) Dial(ctx context.Context, target ServiceEndpoint) (Conn, error) {
 	if target.Local && target.UDSAddr != "" {
+		if r.uds == nil {
+			return nil, errors.New("uds transport is not configured")
+		}
 		return r.uds.Dial(ctx, target)
 	}
 	if target.TCPAddr != "" {
+		if r.tcp == nil {
+			return nil, errors.New("tcp transport is not configured")
+		}
 		return r.tcp.Dial(ctx, target)
 	}
 	if target.UDSAddr != "" {
+		if r.uds == nil {
+			return nil, errors.New("uds transport is not configured")
+		}
 		return r.uds.Dial(ctx, target)
 	}
 	return nil, fmt.Errorf("endpoint %s has no usable address", target.Name)
@@ -75,5 +84,8 @@ func (r *Router) Dial(ctx context.Context, target ServiceEndpoint) (Conn, error)
 
 // Listen delegates to UDS by default for daemon-local listeners.
 func (r *Router) Listen(ctx context.Context, addr string) (Listener, error) {
+	if r.uds == nil {
+		return nil, errors.New("uds transport is not configured")
+	}
 	return r.uds.Listen(ctx, addr)
 }

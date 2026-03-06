@@ -2,6 +2,9 @@ package transport
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,12 +13,15 @@ import (
 func TestUDSTransportSendRecv(t *testing.T) {
 	ctx := context.Background()
 	uds := NewUDSTransport()
-	sock := filepath.Join(t.TempDir(), "echo.sock")
+	sock := testSocketPath(t, "echo")
 	ln, err := uds.Listen(ctx, sock)
 	if err != nil {
 		t.Fatalf("Listen() error = %v", err)
 	}
 	defer ln.Close()
+	if ln.Addr() == "" {
+		t.Fatal("expected non-empty listener address")
+	}
 
 	done := make(chan error, 1)
 	go func() {
@@ -70,6 +76,9 @@ func TestTCPTransportSendRecv(t *testing.T) {
 		t.Fatalf("Listen() error = %v", err)
 	}
 	defer ln.Close()
+	if ln.Addr() == "" {
+		t.Fatal("expected non-empty listener address")
+	}
 
 	done := make(chan error, 1)
 	go func() {
@@ -135,8 +144,97 @@ func TestRouterDialSelection(t *testing.T) {
 	}
 }
 
+func TestRouterErrors(t *testing.T) {
+	r := NewRouter(nil, nil)
+	if _, err := r.Dial(context.Background(), ServiceEndpoint{Name: "svc"}); err == nil {
+		t.Fatal("expected no address error")
+	}
+	if _, err := r.Dial(context.Background(), ServiceEndpoint{Name: "svc", UDSAddr: "/tmp/s.sock", Local: true}); err == nil {
+		t.Fatal("expected nil uds transport error")
+	}
+	if _, err := r.Dial(context.Background(), ServiceEndpoint{Name: "svc", TCPAddr: "127.0.0.1:1"}); err == nil {
+		t.Fatal("expected nil tcp transport error")
+	}
+	if _, err := r.Listen(context.Background(), "/tmp/s.sock"); err == nil {
+		t.Fatal("expected nil uds transport error on listen")
+	}
+}
+
+func TestTransportAddressValidation(t *testing.T) {
+	uds := NewUDSTransport()
+	if _, err := uds.Listen(context.Background(), ""); err == nil {
+		t.Fatal("expected missing uds listen address error")
+	}
+	if _, err := uds.Dial(context.Background(), ServiceEndpoint{}); err == nil {
+		t.Fatal("expected missing uds dial address error")
+	}
+
+	tcp := NewTCPTransport()
+	if _, err := tcp.Dial(context.Background(), ServiceEndpoint{}); err == nil {
+		t.Fatal("expected missing tcp dial address error")
+	}
+	if _, err := tcp.Listen(context.Background(), "not-an-address"); err == nil {
+		t.Fatal("expected invalid tcp listen address error")
+	}
+}
+
+func TestListenerAcceptContextCancelled(t *testing.T) {
+	ctx := context.Background()
+	uds := NewUDSTransport()
+	ln, err := uds.Listen(ctx, testSocketPath(t, "accept"))
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer ln.Close()
+
+	cancelCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err = ln.Accept(cancelCtx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline exceeded, got %v", err)
+	}
+}
+
+func TestTCPListenerAcceptContextCancelled(t *testing.T) {
+	ctx := context.Background()
+	tcp := NewTCPTransport()
+	ln, err := tcp.Listen(ctx, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer ln.Close()
+
+	cancelCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err = ln.Accept(cancelCtx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline exceeded, got %v", err)
+	}
+}
+
+func TestTCPFDUnsupported(t *testing.T) {
+	c := &tcpConn{}
+	if err := c.SendFd(1, []byte("x")); !errors.Is(err, ErrFDUnsupported) {
+		t.Fatalf("expected ErrFDUnsupported from SendFd, got %v", err)
+	}
+	if _, _, err := c.RecvFd(); !errors.Is(err, ErrFDUnsupported) {
+		t.Fatalf("expected ErrFDUnsupported from RecvFd, got %v", err)
+	}
+}
+
+func TestUDSConnFDMethods(t *testing.T) {
+	c := &udsConn{}
+	if err := c.SendFd(1, []byte("x")); err == nil {
+		t.Fatal("expected SendFd error on nil unix conn")
+	}
+	if _, _, err := c.RecvFd(); err == nil {
+		t.Fatal("expected RecvFd error on nil unix conn")
+	}
+}
+
 type fakeTransport struct {
-	dials int
+	dials   int
+	listens int
 }
 
 func (f *fakeTransport) Dial(_ context.Context, _ ServiceEndpoint) (Conn, error) {
@@ -145,7 +243,22 @@ func (f *fakeTransport) Dial(_ context.Context, _ ServiceEndpoint) (Conn, error)
 }
 
 func (f *fakeTransport) Listen(context.Context, string) (Listener, error) {
-	return nil, nil
+	f.listens++
+	return &fakeListener{}, nil
+}
+
+type fakeListener struct{}
+
+func (f *fakeListener) Accept(context.Context) (Conn, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (f *fakeListener) Close() error {
+	return nil
+}
+
+func (f *fakeListener) Addr() string {
+	return "fake"
 }
 
 type fakeConn struct{}
@@ -161,3 +274,46 @@ func errUnexpectedMethod(got string) error { return &methodErr{got: got} }
 type methodErr struct{ got string }
 
 func (e *methodErr) Error() string { return "unexpected method: " + e.got }
+
+func testSocketPath(t *testing.T, prefix string) string {
+	t.Helper()
+	path := filepath.Join("/tmp", fmt.Sprintf("nexus-%s-%d.sock", prefix, time.Now().UnixNano()))
+	t.Cleanup(func() { _ = os.Remove(path) })
+	return path
+}
+
+func TestRouterListenDelegatesToUDS(t *testing.T) {
+	uds := &fakeTransport{}
+	r := NewRouter(uds, nil)
+	ln, err := r.Listen(context.Background(), "/tmp/unused.sock")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	if ln.Addr() != "fake" {
+		t.Fatalf("unexpected listener addr: %s", ln.Addr())
+	}
+	if uds.listens != 1 {
+		t.Fatalf("expected one uds listen call, got %d", uds.listens)
+	}
+}
+
+func TestUDSTransportErrorBranches(t *testing.T) {
+	uds := NewUDSTransport()
+	if _, err := uds.Listen(context.Background(), "/tmp/\x00bad.sock"); err == nil {
+		t.Fatal("expected invalid unix address error")
+	}
+	if _, err := uds.Dial(context.Background(), ServiceEndpoint{UDSAddr: "/tmp/definitely-not-exist.sock"}); err == nil {
+		t.Fatal("expected dial failure for missing socket")
+	}
+}
+
+func TestRouterFallbackToUDSAddress(t *testing.T) {
+	uds := &fakeTransport{}
+	r := NewRouter(uds, nil)
+	if _, err := r.Dial(context.Background(), ServiceEndpoint{Name: "svc", UDSAddr: "/tmp/s.sock"}); err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	if uds.dials != 1 {
+		t.Fatalf("expected uds dial count=1, got %d", uds.dials)
+	}
+}

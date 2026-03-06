@@ -48,6 +48,10 @@ func (d *Daemon) Start(ctx context.Context) error {
 		if err := d.pm.StartService(runCtx, svc); err != nil {
 			_ = d.pm.StopAll()
 			cancel()
+			d.mu.Lock()
+			d.started = false
+			d.cancel = nil
+			d.mu.Unlock()
 			return fmt.Errorf("start service %s: %w", svc.Name, err)
 		}
 	}

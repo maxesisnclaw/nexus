@@ -15,6 +15,9 @@ type HealthMonitor struct {
 
 // NewHealthMonitor creates a health monitor.
 func NewHealthMonitor(logger *slog.Logger, manager *ProcessManager, interval time.Duration) *HealthMonitor {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
 	return &HealthMonitor{logger: logger, manager: manager, interval: interval}
 }
 
