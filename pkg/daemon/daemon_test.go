@@ -263,6 +263,29 @@ func TestNewHealthMonitorDefaultInterval(t *testing.T) {
 	}
 }
 
+func TestHealthMonitorRestartsUnhealthyProcess(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pm := NewProcessManager(logger, time.Second)
+	pm.docker = &fakeDockerRuntime{
+		running: map[string]bool{
+			"nexus-worker": false,
+		},
+	}
+	pm.procs["worker"] = &ManagedProcess{
+		ID:            "worker",
+		Service:       "worker",
+		Spec:          config.ServiceSpec{Name: "worker", Runtime: "docker", Image: "repo/worker:latest"},
+		containerName: "nexus-worker",
+	}
+	h := NewHealthMonitor(logger, pm, 100*time.Millisecond)
+
+	h.checkOnce(context.Background())
+
+	if !pm.IsRunning("worker") {
+		t.Fatal("expected unhealthy process to be restarted")
+	}
+}
+
 func TestProcessManagerStopServiceAggregatesErrors(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	pm := NewProcessManager(logger, time.Second)

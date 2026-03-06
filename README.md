@@ -1,8 +1,6 @@
 # Nexus
 
-[![CI](https://github.com/example/nexus/actions/workflows/ci.yml/badge.svg)](https://github.com/example/nexus/actions/workflows/ci.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/example/nexus)](https://goreportcard.com/report/github.com/example/nexus)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+<!-- TODO: update badge URLs when the public repository is available -->
 
 Nexus is a lightweight microservice foundation focused on local-process orchestration, service registry/discovery, and high-performance IPC.
 
@@ -126,15 +124,7 @@ client.Handle("echo", func(req *sdk.Request) (*sdk.Response, error) {
 
 ### Python SDK
 
-```python
-from pkg.sdk.python.nexus_sdk import Client, Response, Request
-
-client = Client(name="legacy", socket_path="/run/nexus/legacy.sock")
-
-@client.handler("process")
-def process(req: Request) -> Response:
-    return Response(payload=req.payload)
-```
+Python SDK support is planned but not available yet.
 
 See runnable programs in [`examples/`](examples/README.md).
 

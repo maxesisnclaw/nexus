@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -92,8 +93,14 @@ func TestNewValidationAndDefaults(t *testing.T) {
 	if client.cfg.ID != "svc" {
 		t.Fatalf("expected default ID=Name, got %s", client.cfg.ID)
 	}
-	if client.cfg.RequestTimeout <= 0 || client.cfg.LargePayloadThreshold <= 0 || client.cfg.RetryBackoff <= 0 {
-		t.Fatalf("expected positive defaults, got timeout=%s threshold=%d backoff=%s", client.cfg.RequestTimeout, client.cfg.LargePayloadThreshold, client.cfg.RetryBackoff)
+	if client.cfg.RequestTimeout <= 0 || client.cfg.ServeTimeout <= 0 || client.cfg.LargePayloadThreshold <= 0 || client.cfg.RetryBackoff <= 0 {
+		t.Fatalf(
+			"expected positive defaults, got request_timeout=%s serve_timeout=%s threshold=%d backoff=%s",
+			client.cfg.RequestTimeout,
+			client.cfg.ServeTimeout,
+			client.cfg.LargePayloadThreshold,
+			client.cfg.RetryBackoff,
+		)
 	}
 }
 
@@ -200,6 +207,67 @@ func TestCallWithDataFallbackToRegularCall(t *testing.T) {
 	}
 	if !bytes.Equal(resp.Payload, payload) {
 		t.Fatalf("payload mismatch: got=%d want=%d", len(resp.Payload), len(payload))
+	}
+}
+
+func TestCallWithDataFallbackDoesNotRepickInstance(t *testing.T) {
+	origCreateMemfd := createMemfd
+	createMemfd = func(string, []byte) (int, error) {
+		return syscall.Dup(0)
+	}
+	defer func() {
+		createMemfd = origCreateMemfd
+	}()
+
+	reg := registry.New("node-a")
+	defer reg.Close()
+
+	reg.Register(registry.ServiceInstance{
+		Name:      "echo",
+		ID:        "echo-1",
+		Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: "/tmp/echo-1.sock"}},
+	})
+	reg.Register(registry.ServiceInstance{
+		Name:      "echo",
+		ID:        "echo-2",
+		Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: "/tmp/echo-2.sock"}},
+	})
+
+	rt := &routingTransport{
+		queues: map[string][]transport.Conn{
+			"/tmp/echo-1.sock": {
+				&scriptedConn{
+					recvMsg: &transport.Message{Headers: map[string]string{fdReadyKey: "1"}},
+				},
+				&echoConn{},
+			},
+			"/tmp/echo-2.sock": {
+				&scriptedConn{sendErr: errors.New("unexpected fallback dial on second instance")},
+			},
+		},
+	}
+	client, err := New(Config{
+		Name:                  "caller",
+		ID:                    "caller-1",
+		Registry:              reg,
+		Router:                transport.NewRouter(rt, rt),
+		LargePayloadThreshold: 4,
+	})
+	if err != nil {
+		t.Fatalf("New(caller) error = %v", err)
+	}
+	defer client.Close()
+
+	payload := bytes.Repeat([]byte("x"), 32)
+	resp, err := client.CallWithData("echo", "echo", payload)
+	if err != nil {
+		t.Fatalf("CallWithData() error = %v", err)
+	}
+	if !bytes.Equal(resp.Payload, payload) {
+		t.Fatalf("payload mismatch: got=%d want=%d", len(resp.Payload), len(payload))
+	}
+	if got := rt.dialCount("/tmp/echo-2.sock"); got != 0 {
+		t.Fatalf("expected no fallback dial on second instance, got %d", got)
 	}
 }
 
@@ -324,6 +392,52 @@ func TestServeConnErrorHandling(t *testing.T) {
 	}
 }
 
+func TestServeConnTimeout(t *testing.T) {
+	client, err := New(Config{
+		Name:         "svc",
+		UDSAddr:      testSocketPath(t, "serve-timeout"),
+		ServeTimeout: 40 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer client.Close()
+
+	conn := newBlockingConn()
+	done := make(chan struct{})
+	go func() {
+		client.serveConn(conn)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("serveConn() did not return on read timeout")
+	}
+	if !conn.isClosed() {
+		t.Fatal("expected connection to be closed after timeout")
+	}
+}
+
+func TestCloseUsesSyncOnce(t *testing.T) {
+	client, err := New(Config{Name: "svc", UDSAddr: testSocketPath(t, "close-once")})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	listener := &countingListener{closeErr: errors.New("close failed")}
+	client.listener = listener
+
+	err1 := client.Close()
+	err2 := client.Close()
+	if err1 == nil || err2 == nil {
+		t.Fatalf("expected close error on both calls, got err1=%v err2=%v", err1, err2)
+	}
+	if listener.closeCalls != 1 {
+		t.Fatalf("expected listener close once, got %d", listener.closeCalls)
+	}
+}
+
 func TestListenTCPAndDualRegister(t *testing.T) {
 	reg := registry.New("node-a")
 	defer reg.Close()
@@ -400,6 +514,12 @@ type flakyTransport struct {
 	mu           sync.Mutex
 }
 
+type routingTransport struct {
+	mu      sync.Mutex
+	queues  map[string][]transport.Conn
+	history map[string]int
+}
+
 type scriptedConn struct {
 	recvQueue []*transport.Message
 	recvMsg   *transport.Message
@@ -469,6 +589,36 @@ func (f *flakyTransport) Listen(context.Context, string) (transport.Listener, er
 	return nil, errors.New("not implemented")
 }
 
+func (r *routingTransport) Dial(_ context.Context, target transport.ServiceEndpoint) (transport.Conn, error) {
+	addr := target.UDSAddr
+	if addr == "" {
+		addr = target.TCPAddr
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.history == nil {
+		r.history = make(map[string]int)
+	}
+	r.history[addr]++
+	queue := r.queues[addr]
+	if len(queue) == 0 {
+		return nil, fmt.Errorf("no scripted connection for %s", addr)
+	}
+	conn := queue[0]
+	r.queues[addr] = queue[1:]
+	return conn, nil
+}
+
+func (r *routingTransport) Listen(context.Context, string) (transport.Listener, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (r *routingTransport) dialCount(addr string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.history[addr]
+}
+
 type echoConn struct {
 	req *transport.Message
 }
@@ -495,4 +645,64 @@ func (e *echoConn) RecvFd() (int, []byte, error) {
 
 func (e *echoConn) Close() error {
 	return nil
+}
+
+type blockingConn struct {
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func newBlockingConn() *blockingConn {
+	return &blockingConn{closed: make(chan struct{})}
+}
+
+func (b *blockingConn) Send(*transport.Message) error {
+	return nil
+}
+
+func (b *blockingConn) Recv() (*transport.Message, error) {
+	<-b.closed
+	return nil, io.EOF
+}
+
+func (b *blockingConn) SendFd(int, []byte) error {
+	return transport.ErrFDUnsupported
+}
+
+func (b *blockingConn) RecvFd() (int, []byte, error) {
+	return -1, nil, transport.ErrFDUnsupported
+}
+
+func (b *blockingConn) Close() error {
+	b.closeOnce.Do(func() {
+		close(b.closed)
+	})
+	return nil
+}
+
+func (b *blockingConn) isClosed() bool {
+	select {
+	case <-b.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+type countingListener struct {
+	closeCalls int
+	closeErr   error
+}
+
+func (l *countingListener) Accept(context.Context) (transport.Conn, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (l *countingListener) Close() error {
+	l.closeCalls++
+	return l.closeErr
+}
+
+func (l *countingListener) Addr() string {
+	return ""
 }

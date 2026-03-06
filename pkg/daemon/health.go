@@ -11,6 +11,7 @@ type HealthMonitor struct {
 	logger   *slog.Logger
 	manager  *ProcessManager
 	interval time.Duration
+	restart  map[string]time.Time
 }
 
 // NewHealthMonitor creates a health monitor.
@@ -18,7 +19,12 @@ func NewHealthMonitor(logger *slog.Logger, manager *ProcessManager, interval tim
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
-	return &HealthMonitor{logger: logger, manager: manager, interval: interval}
+	return &HealthMonitor{
+		logger:   logger,
+		manager:  manager,
+		interval: interval,
+		restart:  make(map[string]time.Time),
+	}
 }
 
 // Run blocks and periodically logs process health status.
@@ -31,18 +37,35 @@ func (h *HealthMonitor) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			h.checkOnce()
+			h.checkOnce(ctx)
 		}
 	}
 }
 
-func (h *HealthMonitor) checkOnce() {
+func (h *HealthMonitor) checkOnce(ctx context.Context) {
 	states := h.manager.States()
+	now := time.Now()
 	for _, st := range states {
 		if !st.Running {
 			h.logger.Warn("process unhealthy", "id", st.ID, "service", st.Service, "pid", st.PID)
+			if h.shouldRestart(st.ID, now) {
+				if err := h.manager.RestartProcess(ctx, st.ID); err != nil {
+					h.logger.Warn("process restart failed", "id", st.ID, "service", st.Service, "err", err)
+				} else {
+					h.logger.Info("process restarted", "id", st.ID, "service", st.Service)
+				}
+			}
 			continue
 		}
+		delete(h.restart, st.ID)
 		h.logger.Debug("process healthy", "id", st.ID, "service", st.Service, "pid", st.PID)
 	}
+}
+
+func (h *HealthMonitor) shouldRestart(id string, now time.Time) bool {
+	if last, ok := h.restart[id]; ok && now.Sub(last) < h.interval {
+		return false
+	}
+	h.restart[id] = now
+	return true
 }

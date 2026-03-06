@@ -31,6 +31,7 @@ type ManagedProcess struct {
 
 	cmd           *exec.Cmd
 	containerName string
+	exited        chan struct{}
 }
 
 // ProcessManager starts/stops and tracks service processes.
@@ -95,6 +96,31 @@ func (m *ProcessManager) RestartService(ctx context.Context, spec config.Service
 	return m.StartService(ctx, spec)
 }
 
+// RestartProcess restarts one managed process by id.
+func (m *ProcessManager) RestartProcess(ctx context.Context, id string) error {
+	m.mu.RLock()
+	proc, ok := m.procs[id]
+	if !ok {
+		m.mu.RUnlock()
+		return fmt.Errorf("process %s not found", id)
+	}
+	next := &ManagedProcess{
+		ID:      proc.ID,
+		Service: proc.Service,
+		Spec:    proc.Spec,
+		Args:    append([]string(nil), proc.Args...),
+	}
+	m.mu.RUnlock()
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := m.StopProcess(id); err != nil {
+		return err
+	}
+	return m.startProcess(ctx, next)
+}
+
 // StopAll stops all managed processes.
 func (m *ProcessManager) StopAll() error {
 	m.mu.RLock()
@@ -134,25 +160,30 @@ func (m *ProcessManager) StopProcess(id string) error {
 		return nil
 	}
 
-	pid := proc.cmd.Process.Pid
 	if err := proc.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return fmt.Errorf("signal SIGTERM %s: %w", id, err)
 	}
-
-	deadline := time.Now().Add(m.stopWait)
-	for time.Now().Before(deadline) {
-		alive, err := isPIDAlive(pid)
-		if err == nil && !alive {
-			m.deleteProcess(id)
-			return nil
-		}
-		time.Sleep(50 * time.Millisecond)
+	waitCh := proc.exited
+	if waitCh == nil {
+		m.deleteProcessIfMatch(id, proc)
+		return nil
+	}
+	timer := time.NewTimer(m.stopWait)
+	defer timer.Stop()
+	select {
+	case <-waitCh:
+		return nil
+	case <-timer.C:
 	}
 
 	if err := proc.cmd.Process.Signal(syscall.SIGKILL); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return fmt.Errorf("signal SIGKILL %s: %w", id, err)
 	}
-	m.deleteProcess(id)
+	select {
+	case <-waitCh:
+	case <-time.After(500 * time.Millisecond):
+	}
+	m.deleteProcessIfMatch(id, proc)
 	return nil
 }
 
@@ -227,21 +258,23 @@ func (m *ProcessManager) startProcess(ctx context.Context, proc *ManagedProcess)
 		return fmt.Errorf("start process %s: %w", proc.ID, err)
 	}
 	proc.cmd = cmd
+	proc.exited = make(chan struct{})
 
 	m.mu.Lock()
 	m.procs[proc.ID] = proc
 	m.mu.Unlock()
 
 	m.logger.Info("service process started", "id", proc.ID, "service", proc.Service, "pid", cmd.Process.Pid)
-	go func(p *ManagedProcess, c *exec.Cmd) {
+	go func(p *ManagedProcess, c *exec.Cmd, exited chan struct{}) {
 		err := c.Wait()
+		close(exited)
 		if err != nil {
 			m.logger.Warn("service process exited with error", "id", p.ID, "err", err)
 		} else {
 			m.logger.Info("service process exited", "id", p.ID)
 		}
 		m.deleteProcessIfMatch(p.ID, p)
-	}(proc, cmd)
+	}(proc, cmd, proc.exited)
 	return nil
 }
 

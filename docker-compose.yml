@@ -5,7 +5,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: nexusd:local
     command: ["-config", "/etc/nexus/nexus.toml"]
     volumes:
       - ./examples/docker-compose/nexus.compose.toml:/etc/nexus/nexus.toml:ro
@@ -16,7 +15,6 @@ services:
     build:
       context: .
       dockerfile: ./examples/docker-service/Dockerfile
-    image: nexus-example-docker-service:local
     environment:
       - NEXUS_SERVICE_SOCKET=/run/nexus/examples/docker-service.sock
     volumes:

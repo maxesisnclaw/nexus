@@ -19,6 +19,8 @@ const (
 	fdReadyKey   = "ready_fd"
 )
 
+var createMemfd = transport.CreateMemfd
+
 // Config controls SDK client behavior.
 type Config struct {
 	Name                  string
@@ -28,6 +30,7 @@ type Config struct {
 	TCPAddr               string
 	Network               string
 	RequestTimeout        time.Duration
+	ServeTimeout          time.Duration
 	LargePayloadThreshold int
 	CallRetries           int
 	RetryBackoff          time.Duration
@@ -66,6 +69,8 @@ type Client struct {
 	listener   transport.Listener
 	heartbeat  chan struct{}
 	registered bool
+	closeOnce  sync.Once
+	closeErr   error
 }
 
 // New creates a new SDK client instance.
@@ -78,6 +83,9 @@ func New(cfg Config) (*Client, error) {
 	}
 	if cfg.RequestTimeout <= 0 {
 		cfg.RequestTimeout = 5 * time.Second
+	}
+	if cfg.ServeTimeout <= 0 {
+		cfg.ServeTimeout = 30 * time.Second
 	}
 	if cfg.LargePayloadThreshold <= 0 {
 		cfg.LargePayloadThreshold = 1 << 20
@@ -170,7 +178,7 @@ func (c *Client) callOnce(serviceName, method string, payload []byte, preferFD b
 		return c.callMsgpack(conn, method, payload)
 	}
 
-	fd, err := transport.CreateMemfd("nexus-call", payload)
+	fd, err := createMemfd("nexus-call", payload)
 	if err != nil {
 		return c.callMsgpack(conn, method, payload)
 	}
@@ -178,14 +186,14 @@ func (c *Client) callOnce(serviceName, method string, payload []byte, preferFD b
 
 	setup := &transport.Message{Method: fdCallMethod, Headers: map[string]string{"method": method}}
 	if err := conn.Send(setup); err != nil {
-		return c.callOnce(serviceName, method, payload, false)
+		return c.callMsgpackFallback(endpoint, method, payload)
 	}
 	ack, err := conn.Recv()
 	if err != nil || ack.Headers[fdReadyKey] != "1" {
-		return c.callOnce(serviceName, method, payload, false)
+		return c.callMsgpackFallback(endpoint, method, payload)
 	}
 	if err := conn.SendFd(fd, []byte("fd")); err != nil {
-		return c.callOnce(serviceName, method, payload, false)
+		return c.callMsgpackFallback(endpoint, method, payload)
 	}
 	resp, err := conn.Recv()
 	if err != nil {
@@ -195,6 +203,17 @@ func (c *Client) callOnce(serviceName, method string, payload []byte, preferFD b
 		return nil, errors.New(msgErr)
 	}
 	return &Response{Payload: resp.Payload, Headers: resp.Headers}, nil
+}
+
+func (c *Client) callMsgpackFallback(endpoint transport.ServiceEndpoint, method string, payload []byte) (*Response, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.RequestTimeout)
+	defer cancel()
+	conn, err := c.router.Dial(ctx, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return c.callMsgpack(conn, method, payload)
 }
 
 func (c *Client) callMsgpack(conn transport.Conn, method string, payload []byte) (*Response, error) {
@@ -244,23 +263,20 @@ func (c *Client) Serve(ctx context.Context) error {
 
 // Close unregisters this instance and closes server listener.
 func (c *Client) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.registered {
-		c.registry.Unregister(c.cfg.ID)
-		c.registered = false
-	}
-	select {
-	case <-c.heartbeat:
-	default:
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.registered {
+			c.registry.Unregister(c.cfg.ID)
+			c.registered = false
+		}
 		close(c.heartbeat)
-	}
-	if c.listener != nil {
-		err := c.listener.Close()
-		c.listener = nil
-		return err
-	}
-	return nil
+		if c.listener != nil {
+			c.closeErr = c.listener.Close()
+			c.listener = nil
+		}
+	})
+	return c.closeErr
 }
 
 func (c *Client) register(endpoint registry.Endpoint) {
@@ -314,7 +330,7 @@ func (c *Client) listen(ctx context.Context) (transport.Listener, registry.Endpo
 func (c *Client) serveConn(conn transport.Conn) {
 	defer conn.Close()
 	for {
-		msg, err := conn.Recv()
+		msg, err := c.recvWithTimeout(conn)
 		if err != nil {
 			return
 		}
@@ -347,6 +363,29 @@ func (c *Client) serveConn(conn transport.Conn) {
 			continue
 		}
 		_ = conn.Send(&transport.Message{Method: req.Method, Payload: resp.Payload, Headers: resp.Headers})
+	}
+}
+
+func (c *Client) recvWithTimeout(conn transport.Conn) (*transport.Message, error) {
+	if c.cfg.ServeTimeout <= 0 {
+		return conn.Recv()
+	}
+	type recvResult struct {
+		msg *transport.Message
+		err error
+	}
+	resultCh := make(chan recvResult, 1)
+	go func() {
+		msg, err := conn.Recv()
+		resultCh <- recvResult{msg: msg, err: err}
+	}()
+	timer := time.NewTimer(c.cfg.ServeTimeout)
+	defer timer.Stop()
+	select {
+	case result := <-resultCh:
+		return result.msg, result.err
+	case <-timer.C:
+		return nil, errors.New("receive timeout")
 	}
 }
 
