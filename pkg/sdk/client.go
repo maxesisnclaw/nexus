@@ -32,6 +32,74 @@ const (
 	clientClosed
 )
 
+type registryBackend interface {
+	Register(inst registry.ServiceInstance) error
+	Unregister(id string)
+	Heartbeat(id string) bool
+	Lookup(name string) []registry.ServiceInstance
+	Watch(name string, cb func(registry.ChangeEvent)) (unsubscribe func())
+	NodeID() string
+	Close() error
+}
+
+type localRegistryBackend struct {
+	reg *registry.Registry
+}
+
+func (b *localRegistryBackend) Register(inst registry.ServiceInstance) error {
+	return b.reg.Register(inst)
+}
+
+func (b *localRegistryBackend) Unregister(id string) {
+	b.reg.Unregister(id)
+}
+
+func (b *localRegistryBackend) Heartbeat(id string) bool {
+	return b.reg.Heartbeat(id)
+}
+
+func (b *localRegistryBackend) Lookup(name string) []registry.ServiceInstance {
+	return b.reg.Lookup(name)
+}
+
+func (b *localRegistryBackend) Watch(name string, cb func(registry.ChangeEvent)) (unsubscribe func()) {
+	return b.reg.Watch(name, cb)
+}
+
+func (b *localRegistryBackend) NodeID() string {
+	return b.reg.NodeID()
+}
+
+func (b *localRegistryBackend) Close() error {
+	b.reg.Close()
+	return nil
+}
+
+type roundRobinDiscovery struct {
+	registry registryBackend
+	mu       sync.Mutex
+	offset   map[string]int
+}
+
+func newRoundRobinDiscovery(reg registryBackend) *roundRobinDiscovery {
+	return &roundRobinDiscovery{
+		registry: reg,
+		offset:   make(map[string]int),
+	}
+}
+
+func (d *roundRobinDiscovery) Pick(name string) (registry.ServiceInstance, error) {
+	items := d.registry.Lookup(name)
+	if len(items) == 0 {
+		return registry.ServiceInstance{}, fmt.Errorf("service %q not found", name)
+	}
+	d.mu.Lock()
+	idx := d.offset[name] % len(items)
+	d.offset[name] = (idx + 1) % len(items)
+	d.mu.Unlock()
+	return items[idx], nil
+}
+
 // BusinessError wraps errors returned by the remote handler (not transport failures).
 type BusinessError struct {
 	Message string
@@ -69,6 +137,9 @@ type Config struct {
 	MaxInboundConns int
 	// Registry is the service registry backend.
 	Registry *registry.Registry
+	// RegistryAddr points to daemon control socket for cross-process discovery.
+	// When set and Registry is nil, SDK uses remote registry over this socket.
+	RegistryAddr string
 	// Router is the transport router used for outbound dials.
 	// Serve/listen paths use built-in UDS/TCP transports based on Network.
 	Router *transport.Router
@@ -106,8 +177,9 @@ type Client struct {
 	cfg       Config
 	logger    *slog.Logger
 	registry  *registry.Registry
+	regAPI    registryBackend
 	ownsReg   bool
-	discovery *registry.Discovery
+	discovery *roundRobinDiscovery
 	connPool  connectionPool
 
 	handlers map[string]Handler
@@ -156,11 +228,6 @@ func New(cfg Config) (*Client, error) {
 	if cfg.Network == "" {
 		cfg.Network = "uds"
 	}
-	ownsReg := false
-	if cfg.Registry == nil {
-		cfg.Registry = registry.New("local")
-		ownsReg = true
-	}
 	if cfg.Router == nil {
 		cfg.Router = transport.NewRouter(transport.NewUDSTransport(), transport.NewTCPTransport())
 	}
@@ -168,17 +235,36 @@ func New(cfg Config) (*Client, error) {
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
+	localNodeID := detectLocalNodeID()
+
+	var localReg *registry.Registry
+	var regAPI registryBackend
+	ownsReg := false
+	if cfg.Registry != nil {
+		localReg = cfg.Registry
+		regAPI = &localRegistryBackend{reg: cfg.Registry}
+		localNodeID = cfg.Registry.NodeID()
+	} else if cfg.RegistryAddr != "" {
+		remote := newRegistryClient(cfg.RegistryAddr, localNodeID, logger)
+		regAPI = remote
+		ownsReg = true
+	} else {
+		localReg = registry.New(localNodeID)
+		regAPI = &localRegistryBackend{reg: localReg}
+		ownsReg = true
+	}
 
 	return &Client{
 		cfg:         cfg,
 		logger:      logger,
-		registry:    cfg.Registry,
+		registry:    localReg,
+		regAPI:      regAPI,
 		ownsReg:     ownsReg,
-		discovery:   registry.NewDiscovery(cfg.Registry),
+		discovery:   newRoundRobinDiscovery(regAPI),
 		connPool:    newConnectionPool(cfg.Router),
 		handlers:    make(map[string]Handler),
 		heartbeat:   make(chan struct{}),
-		localNodeID: cfg.Registry.NodeID(),
+		localNodeID: localNodeID,
 		activeConns: make(map[transport.Conn]struct{}),
 	}, nil
 }
@@ -543,7 +629,7 @@ func (c *Client) Close() error {
 		c.mu.Lock()
 		c.state = clientClosed
 		if c.registered {
-			c.registry.Unregister(c.cfg.ID)
+			c.regAPI.Unregister(c.cfg.ID)
 			c.registered = false
 		}
 		close(c.heartbeat)
@@ -565,7 +651,10 @@ func (c *Client) Close() error {
 			c.closeErr = errors.Join(c.closeErr, poolErr)
 		}
 		if c.ownsReg {
-			c.registry.Close()
+			closeErr := c.regAPI.Close()
+			if c.closeErr != nil || closeErr != nil {
+				c.closeErr = errors.Join(c.closeErr, closeErr)
+			}
 		}
 		c.mu.Unlock()
 	})
@@ -581,7 +670,7 @@ func (c *Client) register(endpoints []registry.Endpoint) {
 		TTL:          15 * time.Second,
 		Endpoints:    append([]registry.Endpoint(nil), endpoints...),
 	}
-	if err := c.registry.Register(inst); err != nil {
+	if err := c.regAPI.Register(inst); err != nil {
 		c.logger.Error("failed to register service instance", "name", inst.Name, "id", inst.ID, "err", err)
 		return
 	}
@@ -598,7 +687,7 @@ func (c *Client) heartbeatLoop() {
 		case <-c.heartbeat:
 			return
 		case <-ticker.C:
-			_ = c.registry.Heartbeat(c.cfg.ID)
+			_ = c.regAPI.Heartbeat(c.cfg.ID)
 		}
 	}
 }
@@ -783,6 +872,14 @@ func endpointFromInstance(inst registry.ServiceInstance, localNodeID string) (tr
 		return transport.ServiceEndpoint{}, errors.New("instance has no endpoints")
 	}
 	return endpoint, nil
+}
+
+func detectLocalNodeID() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		return "local"
+	}
+	return host
 }
 
 type listenerGroup struct {

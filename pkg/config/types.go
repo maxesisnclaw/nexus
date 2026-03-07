@@ -13,7 +13,7 @@ type Config struct {
 // DaemonConfig controls nexusd runtime behavior.
 type DaemonConfig struct {
 	// Socket is reserved for daemon UDS control-plane socket wiring.
-	// Current runtime does not consume this field yet.
+	// Current runtime uses this field for the daemon control socket.
 	Socket string `toml:"socket"`
 	// LogLevel configures daemon logging verbosity.
 	LogLevel string `toml:"log_level"`
@@ -21,18 +21,10 @@ type DaemonConfig struct {
 	HealthInterval Duration `toml:"health_interval"`
 	// ShutdownGrace is the graceful stop timeout before force kill.
 	ShutdownGrace Duration `toml:"shutdown_grace"`
-	// Peers is reserved for future remote daemon registry sync.
-	// Current runtime does not consume this field yet.
-	Peers []PeerConfig `toml:"peers"`
+	// Peer-based registry sync is planned for a future version.
 	// Listen is reserved for future daemon cross-node TCP listener wiring.
 	// Current runtime does not consume this field yet.
 	Listen string `toml:"listen"`
-}
-
-// PeerConfig describes another daemon node for registry sync.
-type PeerConfig struct {
-	// Addr is the peer daemon address.
-	Addr string `toml:"addr"`
 }
 
 // ServiceSpec describes one managed service entry.
@@ -65,9 +57,9 @@ type ServiceSpec struct {
 	DockerNetwork string `toml:"docker_network"`
 	// ExtraArgs appends raw docker run flags.
 	ExtraArgs []string `toml:"extra_args"`
-	// DependsOn lists service names this service depends on. Reserved for future use; currently not enforced by the daemon.
+	// DependsOn lists service names this service depends on.
 	DependsOn []string `toml:"depends_on"`
-	// HealthCheck endpoint for liveness probing. Reserved for future use; currently not enforced by the daemon.
+	// HealthCheck endpoint for probe-based liveness checking.
 	HealthCheck string `toml:"health_check"`
 	// Network controls service transport exposure.
 	Network string `toml:"network"`

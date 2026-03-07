@@ -378,7 +378,10 @@ func TestIsPIDAliveInvalidAndCurrentProcess(t *testing.T) {
 func TestNewHealthMonitorDefaultInterval(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	pm := NewProcessManager(logger, time.Second)
-	h := NewHealthMonitor(logger, pm, 0, 0)
+	h, err := NewHealthMonitor(logger, pm, 0, 0, nil)
+	if err != nil {
+		t.Fatalf("NewHealthMonitor() error = %v", err)
+	}
 	if h.interval <= 0 {
 		t.Fatalf("expected default interval, got %s", h.interval)
 	}
@@ -401,7 +404,10 @@ func TestHealthMonitorRestartsUnhealthyProcess(t *testing.T) {
 		Spec:          config.ServiceSpec{Name: "worker", Runtime: "docker", Image: "repo/worker:latest"},
 		containerName: "nexus-worker",
 	}
-	h := NewHealthMonitor(logger, pm, 100*time.Millisecond, 5)
+	h, err := NewHealthMonitor(logger, pm, 100*time.Millisecond, 5, nil)
+	if err != nil {
+		t.Fatalf("NewHealthMonitor() error = %v", err)
+	}
 
 	h.checkOnce(context.Background())
 
@@ -413,7 +419,10 @@ func TestHealthMonitorRestartsUnhealthyProcess(t *testing.T) {
 func TestHealthMonitorCleansStaleRestartEntries(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	pm := NewProcessManager(logger, time.Second)
-	h := NewHealthMonitor(logger, pm, 100*time.Millisecond, 5)
+	h, err := NewHealthMonitor(logger, pm, 100*time.Millisecond, 5, nil)
+	if err != nil {
+		t.Fatalf("NewHealthMonitor() error = %v", err)
+	}
 	h.restartState["stale"] = restartState{consecutiveFailures: 1, lastAttempt: time.Now().Add(-time.Minute)}
 
 	h.checkOnce(context.Background())
@@ -438,7 +447,10 @@ func TestHealthMonitorKeepsRestartStateForActiveProcess(t *testing.T) {
 		containerName: "nexus-worker",
 	}
 
-	h := NewHealthMonitor(logger, pm, time.Second, 5)
+	h, err := NewHealthMonitor(logger, pm, time.Second, 5, nil)
+	if err != nil {
+		t.Fatalf("NewHealthMonitor() error = %v", err)
+	}
 	h.restartState["worker"] = restartState{consecutiveFailures: 1, lastAttempt: time.Now()}
 	h.restartState["stale"] = restartState{consecutiveFailures: 1, lastAttempt: time.Now().Add(-time.Minute)}
 
@@ -458,7 +470,10 @@ func TestHealthMonitorKeepsRestartStateForActiveProcess(t *testing.T) {
 func TestHealthMonitorExponentialBackoff(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	pm := NewProcessManager(logger, time.Second)
-	h := NewHealthMonitor(logger, pm, time.Second, 5)
+	h, err := NewHealthMonitor(logger, pm, time.Second, 5, nil)
+	if err != nil {
+		t.Fatalf("NewHealthMonitor() error = %v", err)
+	}
 
 	now := time.Unix(1000, 0)
 	if !h.shouldRestart("worker", now) {
@@ -499,7 +514,10 @@ func TestHealthMonitorMaxRestartLimit(t *testing.T) {
 		containerName: "nexus-worker",
 	}
 
-	h := NewHealthMonitor(logger, pm, 100*time.Millisecond, 3)
+	h, err := NewHealthMonitor(logger, pm, 100*time.Millisecond, 3, nil)
+	if err != nil {
+		t.Fatalf("NewHealthMonitor() error = %v", err)
+	}
 	h.baseBackoff = 0
 	for i := 0; i < 6; i++ {
 		h.checkOnce(context.Background())
@@ -532,7 +550,10 @@ func TestHealthMonitorResetsOnHealthy(t *testing.T) {
 		containerName: "nexus-worker",
 	}
 
-	h := NewHealthMonitor(logger, pm, 100*time.Millisecond, 5)
+	h, err := NewHealthMonitor(logger, pm, 100*time.Millisecond, 5, nil)
+	if err != nil {
+		t.Fatalf("NewHealthMonitor() error = %v", err)
+	}
 	h.baseBackoff = 0
 
 	h.checkOnce(context.Background())
