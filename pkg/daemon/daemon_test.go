@@ -567,6 +567,129 @@ func TestProcessManagerStopServiceAggregatesErrors(t *testing.T) {
 	}
 }
 
+func TestProcessManagerRestartServiceDocker(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pm := NewProcessManager(logger, time.Second)
+	fake := &fakeDockerRuntime{running: map[string]bool{}}
+	pm.docker = fake
+
+	spec := config.ServiceSpec{
+		Name:    "legacy",
+		Type:    "singleton",
+		Runtime: "docker",
+		Image:   "repo/legacy:latest",
+	}
+	if err := pm.StartService(context.Background(), spec); err != nil {
+		t.Fatalf("StartService() error = %v", err)
+	}
+	if fake.startCalls != 1 {
+		t.Fatalf("expected first start call, got %d", fake.startCalls)
+	}
+
+	if err := pm.RestartService(context.Background(), spec); err != nil {
+		t.Fatalf("RestartService() error = %v", err)
+	}
+	if fake.startCalls != 2 {
+		t.Fatalf("expected restart to start service again, got %d starts", fake.startCalls)
+	}
+	if !pm.IsRunning("legacy") {
+		t.Fatal("expected restarted service to be running")
+	}
+}
+
+func TestProcessManagerRestartServiceStopsOnStopError(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pm := NewProcessManager(logger, time.Second)
+	fake := &fakeDockerRuntime{running: map[string]bool{}}
+	pm.docker = fake
+
+	spec := config.ServiceSpec{
+		Name:    "legacy",
+		Type:    "singleton",
+		Runtime: "docker",
+		Image:   "repo/legacy:latest",
+	}
+	if err := pm.StartService(context.Background(), spec); err != nil {
+		t.Fatalf("StartService() error = %v", err)
+	}
+	fake.stopErrs = map[string]error{
+		"nexus-legacy": errors.New("stop failed"),
+	}
+
+	err := pm.RestartService(context.Background(), spec)
+	if err == nil || !strings.Contains(err.Error(), "stop failed") {
+		t.Fatalf("expected restart stop error, got %v", err)
+	}
+	if fake.startCalls != 1 {
+		t.Fatalf("expected restart to abort before re-start, got %d starts", fake.startCalls)
+	}
+}
+
+func TestProcessManagerRestartProcessNotFound(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pm := NewProcessManager(logger, time.Second)
+
+	err := pm.RestartProcess(context.Background(), "missing")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected process not found error, got %v", err)
+	}
+}
+
+func TestProcessManagerRestartProcessNilContext(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pm := NewProcessManager(logger, time.Second)
+	fake := &fakeDockerRuntime{running: map[string]bool{}}
+	pm.docker = fake
+
+	spec := config.ServiceSpec{
+		Name:    "legacy",
+		Type:    "singleton",
+		Runtime: "docker",
+		Image:   "repo/legacy:latest",
+	}
+	if err := pm.StartService(context.Background(), spec); err != nil {
+		t.Fatalf("StartService() error = %v", err)
+	}
+
+	if err := pm.RestartProcess(nil, "legacy"); err != nil {
+		t.Fatalf("RestartProcess() error = %v", err)
+	}
+	if fake.startCalls != 2 {
+		t.Fatalf("expected one start and one restart start, got %d", fake.startCalls)
+	}
+	if !pm.IsRunning("legacy") {
+		t.Fatal("expected restarted process to be running")
+	}
+}
+
+func TestProcessManagerRestartProcessStopError(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pm := NewProcessManager(logger, time.Second)
+	fake := &fakeDockerRuntime{running: map[string]bool{}}
+	pm.docker = fake
+
+	spec := config.ServiceSpec{
+		Name:    "legacy",
+		Type:    "singleton",
+		Runtime: "docker",
+		Image:   "repo/legacy:latest",
+	}
+	if err := pm.StartService(context.Background(), spec); err != nil {
+		t.Fatalf("StartService() error = %v", err)
+	}
+	fake.stopErrs = map[string]error{
+		"nexus-legacy": errors.New("stop failed"),
+	}
+
+	err := pm.RestartProcess(context.Background(), "legacy")
+	if err == nil || !strings.Contains(err.Error(), "stop failed") {
+		t.Fatalf("expected restart process stop error, got %v", err)
+	}
+	if fake.startCalls != 1 {
+		t.Fatalf("expected no extra start on failed restart, got %d starts", fake.startCalls)
+	}
+}
+
 type fakeDockerRuntime struct {
 	running    map[string]bool
 	stopErrs   map[string]error

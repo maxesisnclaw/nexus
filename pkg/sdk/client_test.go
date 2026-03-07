@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -362,6 +363,227 @@ func TestCallWithDataFallbackDoesNotRepickInstance(t *testing.T) {
 	}
 	if got := rt.dialCount("/tmp/echo-2.sock"); got != 0 {
 		t.Fatalf("expected no fallback dial on second instance, got %d", got)
+	}
+}
+
+func TestCallWithDataFallbackOnFDSetupAndAckFailures(t *testing.T) {
+	origCreateMemfd := createMemfd
+	createMemfd = func(string, []byte) (int, error) {
+		return syscall.Dup(0)
+	}
+	defer func() {
+		createMemfd = origCreateMemfd
+	}()
+
+	tests := []struct {
+		name      string
+		firstConn *scriptedConn
+	}{
+		{
+			name:      "fd setup send error",
+			firstConn: &scriptedConn{sendErr: errors.New("setup send failed")},
+		},
+		{
+			name:      "fd ack recv error",
+			firstConn: &scriptedConn{recvErr: io.EOF},
+		},
+		{
+			name:      "fd ack not ready",
+			firstConn: &scriptedConn{recvMsg: &transport.Message{Headers: map[string]string{}}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := registry.New("node-a")
+			defer reg.Close()
+
+			const addr = "/tmp/echo-fd-fallback.sock"
+			reg.Register(registry.ServiceInstance{
+				Name:      "echo",
+				ID:        "echo-1",
+				Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: addr}},
+			})
+
+			rt := &routingTransport{
+				queues: map[string][]transport.Conn{
+					addr: {
+						tc.firstConn,
+						&echoConn{},
+					},
+				},
+			}
+			client, err := New(Config{
+				Name:                  "caller",
+				ID:                    "caller-1",
+				Registry:              reg,
+				Router:                transport.NewRouter(rt, rt),
+				LargePayloadThreshold: 4,
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer client.Close()
+
+			payload := bytes.Repeat([]byte("x"), 32)
+			resp, err := client.CallWithData("echo", "echo", payload)
+			if err != nil {
+				t.Fatalf("CallWithData() error = %v", err)
+			}
+			if !bytes.Equal(resp.Payload, payload) {
+				t.Fatalf("payload mismatch: got=%d want=%d", len(resp.Payload), len(payload))
+			}
+			if got := rt.dialCount(addr); got != 2 {
+				t.Fatalf("expected fd attempt plus fallback dial, got %d", got)
+			}
+		})
+	}
+}
+
+func TestCallWithDataFallbackAcquireFailure(t *testing.T) {
+	origCreateMemfd := createMemfd
+	createMemfd = func(string, []byte) (int, error) {
+		return syscall.Dup(0)
+	}
+	defer func() {
+		createMemfd = origCreateMemfd
+	}()
+
+	reg := registry.New("node-a")
+	defer reg.Close()
+
+	const addr = "/tmp/echo-fd-fallback-acquire.sock"
+	reg.Register(registry.ServiceInstance{
+		Name:      "echo",
+		ID:        "echo-1",
+		Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: addr}},
+	})
+
+	rt := &routingTransport{
+		queues: map[string][]transport.Conn{
+			addr: {
+				&scriptedConn{sendErr: errors.New("setup send failed")},
+			},
+		},
+	}
+	client, err := New(Config{
+		Name:                  "caller",
+		ID:                    "caller-1",
+		Registry:              reg,
+		Router:                transport.NewRouter(rt, rt),
+		LargePayloadThreshold: 4,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer client.Close()
+
+	payload := bytes.Repeat([]byte("x"), 32)
+	if _, err := client.CallWithData("echo", "echo", payload); err == nil {
+		t.Fatal("expected fallback acquire error")
+	}
+}
+
+func TestCallWithDataFDResponseBranches(t *testing.T) {
+	origCreateMemfd := createMemfd
+	createMemfd = func(string, []byte) (int, error) {
+		return syscall.Dup(0)
+	}
+	defer func() {
+		createMemfd = origCreateMemfd
+	}()
+
+	tests := []struct {
+		name      string
+		conn      *scriptedConn
+		wantErr   string
+		wantBytes []byte
+	}{
+		{
+			name: "fd response recv error",
+			conn: &scriptedConn{
+				sendFdOK: true,
+				recvQueue: []*transport.Message{
+					{Headers: map[string]string{fdReadyKey: "1"}},
+				},
+				recvErr: io.EOF,
+			},
+			wantErr: io.EOF.Error(),
+		},
+		{
+			name: "fd response error header",
+			conn: &scriptedConn{
+				sendFdOK: true,
+				recvQueue: []*transport.Message{
+					{Headers: map[string]string{fdReadyKey: "1"}},
+					{Headers: map[string]string{"error": "remote fd error"}},
+				},
+			},
+			wantErr: "remote fd error",
+		},
+		{
+			name: "fd response success",
+			conn: &scriptedConn{
+				sendFdOK: true,
+				recvQueue: []*transport.Message{
+					{Headers: map[string]string{fdReadyKey: "1"}},
+					{Payload: []byte("ok"), Headers: map[string]string{"trace": "1"}},
+				},
+			},
+			wantBytes: []byte("ok"),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := registry.New("node-a")
+			defer reg.Close()
+
+			const addr = "/tmp/echo-fd-response.sock"
+			reg.Register(registry.ServiceInstance{
+				Name:      "echo",
+				ID:        "echo-1",
+				Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: addr}},
+			})
+
+			rt := &routingTransport{
+				queues: map[string][]transport.Conn{
+					addr: {tc.conn},
+				},
+			}
+			client, err := New(Config{
+				Name:                  "caller",
+				ID:                    "caller-1",
+				Registry:              reg,
+				Router:                transport.NewRouter(rt, rt),
+				LargePayloadThreshold: 4,
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer client.Close()
+
+			payload := bytes.Repeat([]byte("x"), 32)
+			resp, err := client.CallWithData("echo", "echo", payload)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+				}
+				if got := rt.dialCount(addr); got != 1 {
+					t.Fatalf("expected no fallback dial on fd response error, got %d", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CallWithData() error = %v", err)
+			}
+			if !bytes.Equal(resp.Payload, tc.wantBytes) {
+				t.Fatalf("payload mismatch: got=%q want=%q", string(resp.Payload), string(tc.wantBytes))
+			}
+			if got := rt.dialCount(addr); got != 1 {
+				t.Fatalf("expected single fd call dial, got %d", got)
+			}
+		})
 	}
 }
 
@@ -837,6 +1059,8 @@ type scriptedConn struct {
 	recvMsg   *transport.Message
 	recvErr   error
 	sendErr   error
+	sendFdErr error
+	sendFdOK  bool
 	recvFd    int
 	recvFdErr error
 	sent      []*transport.Message
@@ -867,6 +1091,12 @@ func (s *scriptedConn) Recv() (*transport.Message, error) {
 }
 
 func (s *scriptedConn) SendFd(int, []byte) error {
+	if s.sendFdErr != nil {
+		return s.sendFdErr
+	}
+	if s.sendFdOK {
+		return nil
+	}
 	return transport.ErrFDUnsupported
 }
 

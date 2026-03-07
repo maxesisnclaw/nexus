@@ -14,35 +14,56 @@ import (
 	"github.com/maxesisn/nexus/pkg/daemon"
 )
 
-func main() {
-	var configPath string
-	flag.StringVar(&configPath, "config", "./nexus.toml", "path to nexus TOML config")
-	flag.Parse()
+type daemonRunner interface {
+	Start(context.Context) error
+	Stop() error
+}
 
-	cfg, err := config.Load(configPath)
+var (
+	loadConfig    = config.Load
+	newDaemon     = func(cfg *config.Config, logger *slog.Logger) daemonRunner { return daemon.New(cfg, logger) }
+	notifyContext = signal.NotifyContext
+)
+
+func main() {
+	os.Exit(run(os.Args[1:]))
+}
+
+func run(args []string) int {
+	flags := flag.NewFlagSet("nexusd", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+
+	var configPath string
+	flags.StringVar(&configPath, "config", "./nexus.toml", "path to nexus TOML config")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+
+	cfg, err := loadConfig(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "load config failed: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	logger := newLogger(cfg.Daemon.LogLevel)
-	d := daemon.New(cfg, logger)
+	d := newDaemon(cfg, logger)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := notifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	if err := d.Start(ctx); err != nil {
 		logger.Error("daemon start failed", "err", err)
-		os.Exit(1)
+		return 1
 	}
 	logger.Info("nexus daemon started")
 
 	<-ctx.Done()
 	if err := d.Stop(); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("daemon stop failed", "err", err)
-		os.Exit(1)
+		return 1
 	}
 	logger.Info("nexus daemon stopped")
+	return 0
 }
 
 func newLogger(level string) *slog.Logger {
