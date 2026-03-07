@@ -127,6 +127,7 @@ func TestDockerCLIStopRoundsUpSubSecondGrace(t *testing.T) {
 
 func stubExecCommandContext(recordPath, failSubcommand string) func() {
 	orig := execCommandContext
+	statePath := recordPath + ".state"
 	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		helperArgs := []string{"-test.run=TestDockerHelperProcess", "--", name}
 		helperArgs = append(helperArgs, args...)
@@ -135,6 +136,7 @@ func stubExecCommandContext(recordPath, failSubcommand string) func() {
 			"GO_WANT_DOCKER_HELPER_PROCESS=1",
 			fmt.Sprintf("NEXUS_DOCKER_RECORD=%s", recordPath),
 			fmt.Sprintf("NEXUS_DOCKER_FAIL=%s", failSubcommand),
+			fmt.Sprintf("NEXUS_DOCKER_STATE=%s", statePath),
 		)
 		return cmd
 	}
@@ -169,6 +171,7 @@ func TestDockerHelperProcess(t *testing.T) {
 		_ = f.Close()
 	}
 	fail := os.Getenv("NEXUS_DOCKER_FAIL")
+	statePath := os.Getenv("NEXUS_DOCKER_STATE")
 	if len(subArgs) > 0 && subArgs[0] == fail {
 		_, _ = fmt.Fprint(os.Stderr, "forced helper failure")
 		os.Exit(7)
@@ -176,9 +179,22 @@ func TestDockerHelperProcess(t *testing.T) {
 
 	switch {
 	case len(subArgs) > 0 && subArgs[0] == "run":
+		if statePath != "" {
+			_ = os.WriteFile(statePath, []byte("true"), 0o644)
+		}
 		_, _ = fmt.Fprintln(os.Stdout, "cid-test")
+	case len(subArgs) > 0 && (subArgs[0] == "stop" || subArgs[0] == "rm"):
+		if statePath != "" {
+			_ = os.WriteFile(statePath, []byte("false"), 0o644)
+		}
 	case len(subArgs) > 0 && subArgs[0] == "inspect":
-		_, _ = fmt.Fprintln(os.Stdout, "true")
+		running := "false"
+		if statePath != "" {
+			if data, err := os.ReadFile(statePath); err == nil && strings.TrimSpace(string(data)) == "true" {
+				running = "true"
+			}
+		}
+		_, _ = fmt.Fprintln(os.Stdout, running)
 	default:
 	}
 	os.Exit(0)

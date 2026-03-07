@@ -112,6 +112,9 @@ type ProcessManager struct {
 
 // NewProcessManager creates a process manager.
 func NewProcessManager(logger *slog.Logger, stopWait time.Duration) *ProcessManager {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &ProcessManager{
 		procs:    make(map[string]*ManagedProcess),
 		logger:   logger,

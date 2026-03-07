@@ -62,14 +62,24 @@ func (d *dockerCLI) Stop(container string, grace time.Duration) error {
 
 	stopArgs := []string{"stop", "--time", strconv.Itoa(seconds), container}
 	stopCmd := execCommandContext(ctx, "docker", stopArgs...)
-	if out, err := stopCmd.CombinedOutput(); err != nil {
-		d.logger.Warn("docker stop returned error", "container", container, "err", err, "output", string(bytes.TrimSpace(out)))
-	}
+	stopOut, stopErr := stopCmd.CombinedOutput()
 
-	// Cleanup is best-effort because stopped containers might already be auto-removed.
+	// Best-effort remove regardless of stop result.
 	rmCmd := execCommandContext(ctx, "docker", "rm", "-f", container)
 	_, _ = rmCmd.CombinedOutput()
-	d.logger.Info("docker container stopped", "container", container)
+
+	// Check if container is actually gone.
+	running, checkErr := d.IsRunning(container)
+	if checkErr == nil && running {
+		return fmt.Errorf("docker stop %s: container still running after stop and rm -f", container)
+	}
+
+	if stopErr != nil {
+		d.logger.Info("docker container stopped (was already exited)", "container", container)
+	} else {
+		d.logger.Info("docker container stopped", "container", container)
+	}
+	_ = stopOut
 	return nil
 }
 

@@ -54,6 +54,7 @@ type Conn interface {
 	SendFd(fd int, metadata []byte) error
 	RecvFd() (fd int, metadata []byte, err error)
 	SetReadDeadline(t time.Time) error
+	SetWriteDeadline(t time.Time) error
 	Close() error
 }
 

@@ -26,6 +26,7 @@ type MsgpackEnvelopeConn interface {
 	Send(msg *Message) error
 	Recv() (*Message, error)
 	SetReadDeadline(t time.Time) error
+	SetWriteDeadline(t time.Time) error
 	Close() error
 }
 
@@ -124,6 +125,10 @@ func (c *msgpackConn) Recv() (*Message, error) {
 
 func (c *msgpackConn) SetReadDeadline(t time.Time) error {
 	return c.raw.SetReadDeadline(t)
+}
+
+func (c *msgpackConn) SetWriteDeadline(t time.Time) error {
+	return c.raw.SetWriteDeadline(t)
 }
 
 func (c *msgpackConn) Close() error {

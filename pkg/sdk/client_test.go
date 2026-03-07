@@ -1144,6 +1144,10 @@ func (s *scriptedConn) SetReadDeadline(time.Time) error {
 	return nil
 }
 
+func (s *scriptedConn) SetWriteDeadline(time.Time) error {
+	return nil
+}
+
 func (f *flakyTransport) Dial(_ context.Context, _ transport.ServiceEndpoint) (transport.Conn, error) {
 	f.dials.Add(1)
 	f.mu.Lock()
@@ -1221,6 +1225,10 @@ func (e *echoConn) SetReadDeadline(time.Time) error {
 	return nil
 }
 
+func (e *echoConn) SetWriteDeadline(time.Time) error {
+	return nil
+}
+
 type trackingEchoConn struct {
 	req        *transport.Message
 	closeCalls atomic.Int32
@@ -1252,6 +1260,10 @@ func (e *trackingEchoConn) Close() error {
 }
 
 func (e *trackingEchoConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+
+func (e *trackingEchoConn) SetWriteDeadline(time.Time) error {
 	return nil
 }
 
@@ -1322,6 +1334,10 @@ func (b *blockingConn) SetReadDeadline(t time.Time) error {
 	b.mu.Lock()
 	b.deadline = t
 	b.mu.Unlock()
+	return nil
+}
+
+func (b *blockingConn) SetWriteDeadline(time.Time) error {
 	return nil
 }
 

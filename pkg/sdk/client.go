@@ -277,10 +277,12 @@ func (c *Client) callOnce(serviceName, method string, payload []byte, preferFD b
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetReadDeadline(deadline)
+		_ = conn.SetWriteDeadline(deadline)
 	}
 	reusable := true
 	defer func() {
 		_ = conn.SetReadDeadline(time.Time{})
+		_ = conn.SetWriteDeadline(time.Time{})
 		c.connPool.Release(endpoint, conn, reusable)
 	}()
 
@@ -340,10 +342,12 @@ func (c *Client) callOnceCtx(ctx context.Context, serviceName, method string, pa
 	}
 	if deadline, ok := reqCtx.Deadline(); ok {
 		_ = conn.SetReadDeadline(deadline)
+		_ = conn.SetWriteDeadline(deadline)
 	}
 	reusable := true
 	defer func() {
 		_ = conn.SetReadDeadline(time.Time{})
+		_ = conn.SetWriteDeadline(time.Time{})
 		c.connPool.Release(endpoint, conn, reusable)
 	}()
 
@@ -399,10 +403,12 @@ func (c *Client) callMsgpackFallbackCtx(ctx context.Context, endpoint transport.
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetReadDeadline(deadline)
+		_ = conn.SetWriteDeadline(deadline)
 	}
 	connHealthy := true
 	defer func() {
 		_ = conn.SetReadDeadline(time.Time{})
+		_ = conn.SetWriteDeadline(time.Time{})
 		c.connPool.Release(endpoint, conn, connHealthy)
 	}()
 	resp, healthy, err := c.callMsgpack(conn, method, payload)
