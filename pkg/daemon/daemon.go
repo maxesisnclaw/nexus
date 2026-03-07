@@ -49,6 +49,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.cancel = cancel
 	d.done = make(chan struct{})
 	d.started = true
+	d.wg.Add(1)
 	d.mu.Unlock()
 
 	// We intentionally use config order for startup to keep behavior explicit
@@ -62,11 +63,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 			d.cancel = nil
 			d.done = nil
 			d.mu.Unlock()
+			d.wg.Done() // Balance Start() Add when health goroutine is not launched.
 			return fmt.Errorf("start service %s: %w", svc.Name, errors.Join(err, stopErr))
 		}
 	}
 
-	d.wg.Add(1)
 	go func(done chan struct{}) {
 		defer d.wg.Done()
 		defer close(done)

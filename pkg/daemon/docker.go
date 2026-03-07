@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -52,7 +53,7 @@ func (d *dockerCLI) Start(ctx context.Context, proc *ManagedProcess) (string, er
 }
 
 func (d *dockerCLI) Stop(container string, grace time.Duration) error {
-	seconds := int(grace.Seconds())
+	seconds := int(math.Ceil(grace.Seconds()))
 	if seconds <= 0 {
 		seconds = 10
 	}

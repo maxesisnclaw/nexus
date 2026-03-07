@@ -631,19 +631,12 @@ func (c *Client) listen(ctx context.Context) ([]transport.Listener, []registry.E
 			return nil, nil, err
 		}
 	case "uds":
-		if c.cfg.UDSAddr != "" {
-			if err := addListener(transport.NewUDSTransport(), registry.EndpointUDS, c.cfg.UDSAddr); err != nil {
-				return nil, nil, err
-			}
-			break
+		if c.cfg.UDSAddr == "" {
+			return nil, nil, errors.New("uds_addr is required for network mode \"uds\"")
 		}
-		if c.cfg.TCPAddr != "" {
-			if err := addListener(transport.NewTCPTransport(), registry.EndpointTCP, c.cfg.TCPAddr); err != nil {
-				return nil, nil, err
-			}
-			break
+		if err := addListener(transport.NewUDSTransport(), registry.EndpointUDS, c.cfg.UDSAddr); err != nil {
+			return nil, nil, err
 		}
-		return nil, nil, errors.New("either uds_addr or tcp_addr is required")
 	default:
 		return nil, nil, fmt.Errorf("unsupported network mode: %s", c.cfg.Network)
 	}

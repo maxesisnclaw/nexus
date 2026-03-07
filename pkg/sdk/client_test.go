@@ -868,6 +868,7 @@ func TestListenTCPAndDualRegister(t *testing.T) {
 		Name:     "svc",
 		ID:       "svc-1",
 		Registry: reg,
+		Network:  "tcp",
 		TCPAddr:  "127.0.0.1:0",
 	})
 	if err != nil {

@@ -45,6 +45,18 @@ type = "singleton"
 	}
 }
 
+func TestParseRejectsRelativeBinary(t *testing.T) {
+	data := []byte(`
+[[service]]
+name = "svc"
+runtime = "binary"
+binary = "echo"
+`)
+	if _, err := Parse(data); err == nil {
+		t.Fatal("expected relative binary validation error")
+	}
+}
+
 func TestDurationMarshalRoundTrip(t *testing.T) {
 	var d Duration
 	if err := d.UnmarshalText([]byte("150ms")); err != nil {

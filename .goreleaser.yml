@@ -5,7 +5,9 @@ project_name: nexus
 before:
   hooks:
     - go mod tidy
+    - go vet ./...
     - go test ./...
+    - go test -race ./...
 
 builds:
   - id: nexusd

@@ -105,6 +105,26 @@ func TestDockerCLIErrorPath(t *testing.T) {
 	}
 }
 
+func TestDockerCLIStopRoundsUpSubSecondGrace(t *testing.T) {
+	recordPath := filepath.Join(t.TempDir(), "docker-args.log")
+	restore := stubExecCommandContext(recordPath, "")
+	defer restore()
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	cli := &dockerCLI{logger: logger}
+	if err := cli.Stop("nexus-svc-1", 500*time.Millisecond); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+
+	data, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(data), "stop --time 1 nexus-svc-1") {
+		t.Fatalf("expected stop timeout rounded up to 1 second, got %s", string(data))
+	}
+}
+
 func stubExecCommandContext(recordPath, failSubcommand string) func() {
 	orig := execCommandContext
 	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {

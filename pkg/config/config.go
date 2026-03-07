@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -73,6 +74,9 @@ func validate(cfg *Config) error {
 		}
 		if svc.Runtime == "binary" && svc.Binary == "" {
 			return fmt.Errorf("service %s binary is required", svc.Name)
+		}
+		if svc.Runtime == "binary" && !filepath.IsAbs(svc.Binary) {
+			return fmt.Errorf("service %s binary must be an absolute path, got %q", svc.Name, svc.Binary)
 		}
 		if svc.Runtime == "docker" && svc.Image == "" {
 			return fmt.Errorf("service %s image is required", svc.Name)
