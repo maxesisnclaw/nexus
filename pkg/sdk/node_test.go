@@ -636,13 +636,57 @@ func TestEndpointFromInstanceErrors(t *testing.T) {
 }
 
 func TestDispatchHandlerNotFound(t *testing.T) {
-	client, err := New(Config{Name: "svc", UDSAddr: filepath.Join(t.TempDir(), "svc.sock")})
+	node, err := New(Config{Name: "svc", UDSAddr: filepath.Join(t.TempDir(), "svc.sock")})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer client.Close()
-	if _, err := client.dispatch(&Request{Method: "missing"}); err == nil {
+	defer node.Close()
+	if _, err := node.dispatch(&Request{Method: "missing"}); err == nil {
 		t.Fatal("expected missing handler error")
+	} else if !strings.Contains(err.Error(), `dispatch method "missing"`) {
+		t.Fatalf("expected method name in dispatch error, got %v", err)
+	}
+}
+
+func TestHandleFuncRegistersPlainFunction(t *testing.T) {
+	node, err := New(Config{Name: "svc", UDSAddr: filepath.Join(t.TempDir(), "svc.sock")})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer node.Close()
+	node.HandleFunc("echo", func(req *Request) (*Response, error) {
+		return &Response{Payload: append(req.Payload, '!')}, nil
+	})
+
+	resp, err := node.dispatch(&Request{Method: "echo", Payload: []byte("ok")})
+	if err != nil {
+		t.Fatalf("dispatch() error = %v", err)
+	}
+	if string(resp.Payload) != "ok!" {
+		t.Fatalf("unexpected payload: %q", string(resp.Payload))
+	}
+}
+
+func TestCallIncludesNodeServiceAndMethodContext(t *testing.T) {
+	node, err := New(Config{Name: "caller", ID: "caller-1"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer node.Close()
+
+	_, err = node.Call("missing-svc", "echo", []byte("hello"))
+	if err == nil {
+		t.Fatal("expected call error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, `node caller/caller-1`) {
+		t.Fatalf("expected node context, got %v", err)
+	}
+	if !strings.Contains(msg, `service="missing-svc"`) {
+		t.Fatalf("expected service context, got %v", err)
+	}
+	if !strings.Contains(msg, `method="echo"`) {
+		t.Fatalf("expected method context, got %v", err)
 	}
 }
 

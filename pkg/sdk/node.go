@@ -24,12 +24,12 @@ const (
 
 var createMemfd = transport.CreateMemfd
 
-type clientState int
+type nodeState int
 
 const (
-	clientNew clientState = iota
-	clientServing
-	clientClosed
+	nodeNew nodeState = iota
+	nodeServing
+	nodeClosed
 )
 
 type registryBackend interface {
@@ -109,7 +109,7 @@ func (e *BusinessError) Error() string {
 	return e.Message
 }
 
-// Config controls SDK client behavior.
+// Config controls SDK node behavior.
 type Config struct {
 	// Name is the service name to register.
 	Name string
@@ -172,8 +172,11 @@ type Response struct {
 // Handler handles one rpc invocation.
 type Handler func(*Request) (*Response, error)
 
-// Client provides service registration, serving, and rpc invocation.
-type Client struct {
+// HandlerFunc is an adapter alias to allow ordinary functions as handlers.
+type HandlerFunc = Handler
+
+// Node provides service registration, serving, and rpc invocation.
+type Node struct {
 	cfg       Config
 	logger    *slog.Logger
 	registry  *registry.Registry
@@ -187,7 +190,7 @@ type Client struct {
 	localNodeID string
 
 	mu         sync.RWMutex
-	state      clientState
+	state      nodeState
 	listener   transport.Listener
 	heartbeat  chan struct{}
 	registered bool
@@ -199,8 +202,8 @@ type Client struct {
 	activeWg      sync.WaitGroup
 }
 
-// New creates a new SDK client instance.
-func New(cfg Config) (*Client, error) {
+// New creates a new SDK node instance.
+func New(cfg Config) (*Node, error) {
 	if cfg.Name == "" {
 		return nil, errors.New("sdk name is required")
 	}
@@ -254,7 +257,7 @@ func New(cfg Config) (*Client, error) {
 		ownsReg = true
 	}
 
-	return &Client{
+	return &Node{
 		cfg:         cfg,
 		logger:      logger,
 		registry:    localReg,
@@ -270,39 +273,72 @@ func New(cfg Config) (*Client, error) {
 }
 
 // Handle registers a handler for one method.
-func (c *Client) Handle(method string, handler Handler) {
+func (c *Node) Handle(method string, handler Handler) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.handlers[method] = handler
 }
 
+// HandleFunc registers a handler function for the given method.
+// It is a convenience wrapper around Handle that accepts a plain function
+// instead of requiring a Handler type conversion at call sites.
+func (c *Node) HandleFunc(method string, fn func(req *Request) (*Response, error)) {
+	c.Handle(method, HandlerFunc(fn))
+}
+
 // Call invokes a method on one service instance picked by discovery.
-func (c *Client) Call(serviceName, method string, payload []byte) (*Response, error) {
-	return c.callWithRetry(serviceName, method, payload, false)
+func (c *Node) Call(serviceName, method string, payload []byte) (*Response, error) {
+	resp, err := c.callWithRetry(serviceName, method, payload, false)
+	if err != nil {
+		return nil, fmt.Errorf("node %s/%s: call service=%q method=%q: %w", c.cfg.Name, c.cfg.ID, serviceName, method, err)
+	}
+	return resp, nil
 }
 
 // CallContext invokes a method with caller-provided context for cancellation and deadlines.
-func (c *Client) CallContext(ctx context.Context, serviceName, method string, payload []byte) (*Response, error) {
-	return c.callWithRetryCtx(ctx, serviceName, method, payload, false)
+func (c *Node) CallContext(ctx context.Context, serviceName, method string, payload []byte) (*Response, error) {
+	resp, err := c.callWithRetryCtx(ctx, serviceName, method, payload, false)
+	if err != nil {
+		return nil, fmt.Errorf("node %s/%s: call context service=%q method=%q: %w", c.cfg.Name, c.cfg.ID, serviceName, method, err)
+	}
+	return resp, nil
 }
 
 // CallWithData attempts fd-based transfer on local UDS and falls back to Call.
-func (c *Client) CallWithData(serviceName, method string, payload []byte) (*Response, error) {
+func (c *Node) CallWithData(serviceName, method string, payload []byte) (*Response, error) {
+	var (
+		resp *Response
+		err  error
+	)
 	if len(payload) < c.cfg.LargePayloadThreshold {
-		return c.callWithRetry(serviceName, method, payload, false)
+		resp, err = c.callWithRetry(serviceName, method, payload, false)
+	} else {
+		resp, err = c.callWithRetry(serviceName, method, payload, true)
 	}
-	return c.callWithRetry(serviceName, method, payload, true)
+	if err != nil {
+		return nil, fmt.Errorf("node %s/%s: call with data service=%q method=%q: %w", c.cfg.Name, c.cfg.ID, serviceName, method, err)
+	}
+	return resp, nil
 }
 
 // CallWithDataContext attempts fd-based transfer with caller-provided context.
-func (c *Client) CallWithDataContext(ctx context.Context, serviceName, method string, payload []byte) (*Response, error) {
+func (c *Node) CallWithDataContext(ctx context.Context, serviceName, method string, payload []byte) (*Response, error) {
+	var (
+		resp *Response
+		err  error
+	)
 	if len(payload) < c.cfg.LargePayloadThreshold {
-		return c.callWithRetryCtx(ctx, serviceName, method, payload, false)
+		resp, err = c.callWithRetryCtx(ctx, serviceName, method, payload, false)
+	} else {
+		resp, err = c.callWithRetryCtx(ctx, serviceName, method, payload, true)
 	}
-	return c.callWithRetryCtx(ctx, serviceName, method, payload, true)
+	if err != nil {
+		return nil, fmt.Errorf("node %s/%s: call with data context service=%q method=%q: %w", c.cfg.Name, c.cfg.ID, serviceName, method, err)
+	}
+	return resp, nil
 }
 
-func (c *Client) callWithRetry(serviceName, method string, payload []byte, preferFD bool) (*Response, error) {
+func (c *Node) callWithRetry(serviceName, method string, payload []byte, preferFD bool) (*Response, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.cfg.CallRetries; attempt++ {
 		resp, err := c.callOnce(serviceName, method, payload, preferFD)
@@ -322,7 +358,7 @@ func (c *Client) callWithRetry(serviceName, method string, payload []byte, prefe
 	return nil, lastErr
 }
 
-func (c *Client) callWithRetryCtx(ctx context.Context, serviceName, method string, payload []byte, preferFD bool) (*Response, error) {
+func (c *Node) callWithRetryCtx(ctx context.Context, serviceName, method string, payload []byte, preferFD bool) (*Response, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.cfg.CallRetries; attempt++ {
 		resp, err := c.callOnceCtx(ctx, serviceName, method, payload, preferFD)
@@ -346,7 +382,7 @@ func (c *Client) callWithRetryCtx(ctx context.Context, serviceName, method strin
 	return nil, lastErr
 }
 
-func (c *Client) callOnce(serviceName, method string, payload []byte, preferFD bool) (*Response, error) {
+func (c *Node) callOnce(serviceName, method string, payload []byte, preferFD bool) (*Response, error) {
 	inst, err := c.discovery.Pick(serviceName)
 	if err != nil {
 		return nil, err
@@ -411,7 +447,7 @@ func (c *Client) callOnce(serviceName, method string, payload []byte, preferFD b
 	return &Response{Payload: resp.Payload, Headers: resp.Headers}, nil
 }
 
-func (c *Client) callOnceCtx(ctx context.Context, serviceName, method string, payload []byte, preferFD bool) (*Response, error) {
+func (c *Node) callOnceCtx(ctx context.Context, serviceName, method string, payload []byte, preferFD bool) (*Response, error) {
 	inst, err := c.discovery.Pick(serviceName)
 	if err != nil {
 		return nil, err
@@ -476,11 +512,11 @@ func (c *Client) callOnceCtx(ctx context.Context, serviceName, method string, pa
 	return &Response{Payload: resp.Payload, Headers: resp.Headers}, nil
 }
 
-func (c *Client) callMsgpackFallback(endpoint transport.ServiceEndpoint, method string, payload []byte) (*Response, error) {
+func (c *Node) callMsgpackFallback(endpoint transport.ServiceEndpoint, method string, payload []byte) (*Response, error) {
 	return c.callMsgpackFallbackCtx(context.Background(), endpoint, method, payload)
 }
 
-func (c *Client) callMsgpackFallbackCtx(ctx context.Context, endpoint transport.ServiceEndpoint, method string, payload []byte) (*Response, error) {
+func (c *Node) callMsgpackFallbackCtx(ctx context.Context, endpoint transport.ServiceEndpoint, method string, payload []byte) (*Response, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.cfg.RequestTimeout)
 	defer cancel()
 	conn, err := c.connPool.Acquire(ctx, endpoint)
@@ -502,7 +538,7 @@ func (c *Client) callMsgpackFallbackCtx(ctx context.Context, endpoint transport.
 	return resp, err
 }
 
-func (c *Client) callMsgpack(conn transport.Conn, method string, payload []byte) (*Response, bool, error) {
+func (c *Node) callMsgpack(conn transport.Conn, method string, payload []byte) (*Response, bool, error) {
 	if err := conn.Send(&transport.Message{Method: method, Payload: payload}); err != nil {
 		return nil, false, err
 	}
@@ -517,27 +553,27 @@ func (c *Client) callMsgpack(conn transport.Conn, method string, payload []byte)
 }
 
 // Serve starts serving requests from configured endpoint.
-func (c *Client) Serve(ctx context.Context) error {
+func (c *Node) Serve(ctx context.Context) error {
 	c.mu.Lock()
 	state := c.state
-	if state != clientNew {
+	if state != nodeNew {
 		c.mu.Unlock()
-		if state == clientClosed {
-			return errors.New("client is closed")
+		if state == nodeClosed {
+			return fmt.Errorf("node %s/%s: serve: node is closed", c.cfg.Name, c.cfg.ID)
 		}
-		return errors.New("client is already serving")
+		return fmt.Errorf("node %s/%s: serve: node is already serving", c.cfg.Name, c.cfg.ID)
 	}
-	c.state = clientServing
+	c.state = nodeServing
 	c.mu.Unlock()
 
 	listeners, endpoints, err := c.listen(ctx)
 	if err != nil {
 		c.mu.Lock()
-		if c.state == clientServing {
-			c.state = clientNew
+		if c.state == nodeServing {
+			c.state = nodeNew
 		}
 		c.mu.Unlock()
-		return err
+		return fmt.Errorf("node %s/%s: serve listen: %w", c.cfg.Name, c.cfg.ID, err)
 	}
 	listener := &listenerGroup{listeners: listeners}
 	c.mu.Lock()
@@ -592,12 +628,12 @@ func (c *Client) Serve(ctx context.Context) error {
 		case result := <-acceptCh:
 			if result.err != nil {
 				c.mu.RLock()
-				closed := c.state == clientClosed
+				closed := c.state == nodeClosed
 				c.mu.RUnlock()
 				if closed {
 					return nil
 				}
-				return result.err
+				return fmt.Errorf("node %s/%s: accept inbound connection: %w", c.cfg.Name, c.cfg.ID, result.err)
 			}
 			select {
 			case connSem <- struct{}{}:
@@ -624,10 +660,10 @@ func (c *Client) Serve(ctx context.Context) error {
 }
 
 // Close unregisters this instance and closes server listener.
-func (c *Client) Close() error {
+func (c *Node) Close() error {
 	c.closeOnce.Do(func() {
 		c.mu.Lock()
-		c.state = clientClosed
+		c.state = nodeClosed
 		if c.registered {
 			c.regAPI.Unregister(c.cfg.ID)
 			c.registered = false
@@ -659,10 +695,13 @@ func (c *Client) Close() error {
 		c.mu.Unlock()
 	})
 	c.activeWg.Wait()
-	return c.closeErr
+	if c.closeErr != nil {
+		return fmt.Errorf("node %s/%s: close: %w", c.cfg.Name, c.cfg.ID, c.closeErr)
+	}
+	return nil
 }
 
-func (c *Client) register(endpoints []registry.Endpoint) {
+func (c *Node) register(endpoints []registry.Endpoint) {
 	inst := registry.ServiceInstance{
 		Name:         c.cfg.Name,
 		ID:           c.cfg.ID,
@@ -679,7 +718,7 @@ func (c *Client) register(endpoints []registry.Endpoint) {
 	c.mu.Unlock()
 }
 
-func (c *Client) heartbeatLoop() {
+func (c *Node) heartbeatLoop() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -692,7 +731,7 @@ func (c *Client) heartbeatLoop() {
 	}
 }
 
-func (c *Client) listen(ctx context.Context) ([]transport.Listener, []registry.Endpoint, error) {
+func (c *Node) listen(ctx context.Context) ([]transport.Listener, []registry.Endpoint, error) {
 	mode := strings.ToLower(c.cfg.Network)
 	if mode == "" {
 		mode = "uds"
@@ -748,7 +787,7 @@ func (c *Client) listen(ctx context.Context) ([]transport.Listener, []registry.E
 	return listeners, endpoints, nil
 }
 
-func (c *Client) serveConn(conn transport.Conn) {
+func (c *Node) serveConn(conn transport.Conn) {
 	defer conn.Close()
 	for {
 		msg, err := c.recvWithTimeout(conn)
@@ -813,7 +852,7 @@ func (c *Client) serveConn(conn transport.Conn) {
 	}
 }
 
-func (c *Client) recvWithTimeout(conn transport.Conn) (*transport.Message, error) {
+func (c *Node) recvWithTimeout(conn transport.Conn) (*transport.Message, error) {
 	if c.cfg.ServeTimeout <= 0 {
 		return conn.Recv()
 	}
@@ -840,19 +879,19 @@ func (c *Client) recvWithTimeout(conn transport.Conn) (*transport.Message, error
 	return msg, nil
 }
 
-func (c *Client) dispatch(req *Request) (resp *Response, err error) {
+func (c *Node) dispatch(req *Request) (resp *Response, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			c.logger.Error("handler panic", "method", req.Method, "panic", r)
 			resp = nil
-			err = fmt.Errorf("handler panic: %v", r)
+			err = fmt.Errorf("node %s/%s: dispatch method %q panic: %v", c.cfg.Name, c.cfg.ID, req.Method, r)
 		}
 	}()
 	c.mu.RLock()
 	handler, ok := c.handlers[req.Method]
 	c.mu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("handler not found: %s", req.Method)
+		return nil, fmt.Errorf("node %s/%s: dispatch method %q: handler not found", c.cfg.Name, c.cfg.ID, req.Method)
 	}
 	return handler(req)
 }

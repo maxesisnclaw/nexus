@@ -30,7 +30,7 @@ func run(ctx context.Context, sock string) error {
 	reg := registry.New("docker-example")
 	defer reg.Close()
 
-	client, err := sdk.New(sdk.Config{
+	node, err := sdk.New(sdk.Config{
 		Name:     "docker-service",
 		ID:       "docker-service-1",
 		Registry: reg,
@@ -39,13 +39,13 @@ func run(ctx context.Context, sock string) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer node.Close()
 
-	client.Handle("process", func(req *sdk.Request) (*sdk.Response, error) {
+	node.Handle("process", func(req *sdk.Request) (*sdk.Response, error) {
 		out := strings.ToUpper(string(req.Payload))
 		return &sdk.Response{Payload: []byte(out)}, nil
 	})
 
 	fmt.Printf("docker service listening on %s\n", sock)
-	return client.Serve(ctx)
+	return node.Serve(ctx)
 }

@@ -18,17 +18,17 @@ func TestNewUsesRemoteRegistryWhenRegistryAddrSet(t *testing.T) {
 	socket, stop := startControlDaemonForSDK(t)
 	defer stop()
 
-	client, err := New(Config{Name: "svc", RegistryAddr: socket})
+	node, err := New(Config{Name: "svc", RegistryAddr: socket})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer client.Close()
+	defer node.Close()
 
-	if client.registry != nil {
+	if node.registry != nil {
 		t.Fatal("expected local registry to be nil when RegistryAddr is used")
 	}
-	if _, ok := client.regAPI.(*registryClient); !ok {
-		t.Fatalf("expected remote registry client backend, got %T", client.regAPI)
+	if _, ok := node.regAPI.(*registryClient); !ok {
+		t.Fatalf("expected remote registry client backend, got %T", node.regAPI)
 	}
 }
 
