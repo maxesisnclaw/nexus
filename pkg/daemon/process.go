@@ -244,29 +244,53 @@ func (m *ProcessManager) StopProcess(id string) error {
 	}
 	select {
 	case <-waitCh:
+		m.deleteProcessIfMatch(id, proc)
+		return nil
 	case <-time.After(500 * time.Millisecond):
+		m.logger.Warn("process did not exit after SIGKILL, keeping record for retry", "id", id)
+		return fmt.Errorf("process %s did not exit after SIGKILL", id)
 	}
-	m.deleteProcessIfMatch(id, proc)
-	return nil
 }
 
 // States returns a snapshot of all process states.
 func (m *ProcessManager) States() []ProcessState {
+	type snapshot struct {
+		id            string
+		service       string
+		runtime       string
+		containerName string
+		pid           int
+		cmd           *exec.Cmd
+	}
+
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	states := make([]ProcessState, 0, len(m.procs))
+	snaps := make([]snapshot, 0, len(m.procs))
 	for id, p := range m.procs {
-		pid := 0
+		s := snapshot{
+			id:            id,
+			service:       p.Service,
+			runtime:       p.Spec.Runtime,
+			containerName: p.containerName,
+		}
+		if p.cmd != nil && p.cmd.Process != nil {
+			s.pid = p.cmd.Process.Pid
+			s.cmd = p.cmd
+		}
+		snaps = append(snaps, s)
+	}
+	m.mu.RUnlock()
+
+	states := make([]ProcessState, 0, len(snaps))
+	for _, s := range snaps {
 		running := false
-		if p.Spec.Runtime == "docker" {
-			alive, err := m.docker.IsRunning(p.containerName)
+		if s.runtime == "docker" {
+			alive, err := m.docker.IsRunning(s.containerName)
 			running = err == nil && alive
-		} else if p.cmd != nil && p.cmd.Process != nil {
-			pid = p.cmd.Process.Pid
-			alive, err := isPIDAlive(pid)
+		} else if s.cmd != nil && s.cmd.Process != nil {
+			alive, err := isPIDAlive(s.pid)
 			running = err == nil && alive
 		}
-		states = append(states, ProcessState{ID: id, Service: p.Service, PID: pid, Running: running})
+		states = append(states, ProcessState{ID: s.id, Service: s.service, PID: s.pid, Running: running})
 	}
 	return states
 }

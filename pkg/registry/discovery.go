@@ -3,15 +3,17 @@ package registry
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 )
 
 const watcherQueueSize = 64
 
 type watcher struct {
-	cb     func(ChangeEvent)
-	events chan ChangeEvent
-	mu     sync.Mutex
-	closed bool
+	cb      func(ChangeEvent)
+	events  chan ChangeEvent
+	mu      sync.Mutex
+	closed  bool
+	dropped atomic.Int64
 }
 
 func newWatcher(cb func(ChangeEvent)) *watcher {
@@ -43,7 +45,12 @@ func (w *watcher) enqueue(event ChangeEvent) {
 	select {
 	case w.events <- event:
 	default:
+		w.dropped.Add(1)
 	}
+}
+
+func (w *watcher) Dropped() int64 {
+	return w.dropped.Load()
 }
 
 func (w *watcher) close() {
