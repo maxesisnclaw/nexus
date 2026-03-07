@@ -1259,8 +1259,10 @@ func TestHeartbeatLoopReregistersAfterConsecutiveFailures(t *testing.T) {
 	}
 
 	done := make(chan struct{})
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+	defer loopCancel()
 	go func() {
-		node.heartbeatLoop()
+		node.heartbeatLoop(loopCtx)
 		close(done)
 	}()
 
@@ -1275,14 +1277,14 @@ func TestHeartbeatLoopReregistersAfterConsecutiveFailures(t *testing.T) {
 		t.Fatalf("expected re-registration after heartbeat failures, got register calls=%d", got)
 	}
 
-	close(node.heartbeat)
+	loopCancel()
 	select {
 	case <-done:
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("timeout waiting heartbeat loop to stop")
 	}
 
-	if got := node.heartbeatFailures; got != 0 {
+	if got := node.heartbeatFailures.Load(); got != 0 {
 		t.Fatalf("expected heartbeat failure counter reset after re-registration, got %d", got)
 	}
 }

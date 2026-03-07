@@ -19,7 +19,7 @@ from .transport import recv_message, send_message
 DEFAULT_REGISTRY_ADDR = "/run/nexus/registry.sock"
 _HEARTBEAT_INTERVAL_SECONDS = 5.0
 _TCP_IDLE_TIMEOUT_SECONDS = 300.0
-_TCP_LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost", "")
+_TCP_LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 logger = logging.getLogger("nexus_sdk")
 
 
@@ -472,12 +472,28 @@ class Node:
         if not isinstance(instance_node, str):
             instance_node = ""
         is_local_instance = bool(instance_node) and instance_node == self._local_node_id
+        is_remote_instance = bool(instance_node) and instance_node != self._local_node_id
 
         if is_local_instance:
             if uds_addr:
                 return uds_addr, False
             if tcp_addr:
                 return tcp_addr, True
+        elif is_remote_instance:
+            if tcp_addr:
+                return tcp_addr, True
+            if uds_addr:
+                instance_id = instance.get("id", "")
+                if isinstance(instance_id, bytes):
+                    try:
+                        instance_id = instance_id.decode()
+                    except UnicodeDecodeError:
+                        instance_id = ""
+                if not isinstance(instance_id, str):
+                    instance_id = ""
+                raise ConnectionError(
+                    f"remote instance {instance_id} has no TCP endpoint; refusing UDS fallback for non-local target"
+                )
         else:
             if tcp_addr:
                 return tcp_addr, True
@@ -524,6 +540,9 @@ class Node:
             host, _ = cls._parse_tcp_addr(addr)
         except ValueError:
             host = addr.split(":")[0] if ":" in addr else addr
+        host = host.strip().lower()
+        if host in {"", "0.0.0.0", "::"}:
+            return False
         return host in _TCP_LOOPBACK_HOSTS
 
     def _validate_tcp_listen_addr(self, addr: str) -> None:

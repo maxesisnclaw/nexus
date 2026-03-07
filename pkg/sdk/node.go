@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -209,12 +210,14 @@ type Node struct {
 	state               nodeState
 	listener            transport.Listener
 	heartbeat           chan struct{}
+	heartbeatCancel     context.CancelFunc
+	heartbeatWG         sync.WaitGroup
 	registered          bool
 	registeredEndpoints []registry.Endpoint
 	closeOnce           sync.Once
 	closeErr            error
 
-	heartbeatFailures int
+	heartbeatFailures atomic.Int32
 
 	activeConns   map[transport.Conn]struct{}
 	activeConnsMu sync.Mutex
@@ -646,7 +649,15 @@ func (c *Node) Serve(ctx context.Context) error {
 		return fmt.Errorf("node %s/%s: register service instance: %w", c.cfg.Name, c.cfg.ID, err)
 	}
 	defer c.Close()
-	go c.heartbeatLoop()
+	hbCtx, hbCancel := context.WithCancel(ctx)
+	c.mu.Lock()
+	c.heartbeatCancel = hbCancel
+	c.mu.Unlock()
+	c.heartbeatWG.Add(1)
+	go func() {
+		defer c.heartbeatWG.Done()
+		c.heartbeatLoop(hbCtx)
+	}()
 	go func() {
 		<-ctx.Done()
 		_ = c.Close()
@@ -726,20 +737,41 @@ func (c *Node) Serve(ctx context.Context) error {
 // Close unregisters this instance and closes server listener.
 func (c *Node) Close() error {
 	c.closeOnce.Do(func() {
+		var (
+			hbCancel context.CancelFunc
+			listener transport.Listener
+		)
+
 		c.mu.Lock()
 		c.state = nodeClosed
-		if c.registered {
-			c.regAPI.Unregister(c.cfg.ID)
-			c.registered = false
-			c.registeredEndpoints = nil
+		hbCancel = c.heartbeatCancel
+		c.heartbeatCancel = nil
+		c.heartbeatFailures.Store(0)
+		if c.heartbeat != nil {
+			close(c.heartbeat)
 		}
-		c.heartbeatFailures = 0
-		close(c.heartbeat)
 		if c.listener != nil {
-			c.closeErr = c.listener.Close()
+			listener = c.listener
 			c.listener = nil
 		}
 		c.mu.Unlock()
+
+		if hbCancel != nil {
+			hbCancel()
+		}
+		c.heartbeatWG.Wait()
+
+		c.mu.Lock()
+		registered := c.registered
+		c.registered = false
+		c.registeredEndpoints = nil
+		c.mu.Unlock()
+		if registered {
+			c.regAPI.Unregister(c.cfg.ID)
+		}
+		if listener != nil {
+			c.closeErr = listener.Close()
+		}
 
 		c.activeConnsMu.Lock()
 		for conn := range c.activeConns {
@@ -780,6 +812,11 @@ func (c *Node) register(ctx context.Context, endpoints []registry.Endpoint) erro
 
 	var lastErr error
 	for attempt := 1; attempt <= c.cfg.RegisterRetries; attempt++ {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("registration canceled: %w", ctx.Err())
+		default:
+		}
 		if err := c.regAPI.Register(inst); err == nil {
 			c.mu.Lock()
 			c.registered = true
@@ -811,22 +848,29 @@ func (c *Node) register(ctx context.Context, endpoints []registry.Endpoint) erro
 	return lastErr
 }
 
-func (c *Node) heartbeatLoop() {
+func (c *Node) heartbeatLoop(ctx context.Context) {
 	ticker := time.NewTicker(nodeHeartbeatInterval)
 	defer ticker.Stop()
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-c.heartbeat:
 			return
 		case <-ticker.C:
 			if c.regAPI.Heartbeat(c.cfg.ID) {
-				c.heartbeatFailures = 0
+				c.heartbeatFailures.Store(0)
 				continue
 			}
 
-			c.heartbeatFailures++
-			if c.heartbeatFailures < 3 {
+			failures := c.heartbeatFailures.Add(1)
+			if failures < 3 {
 				continue
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
 			}
 
 			c.mu.RLock()
@@ -836,23 +880,26 @@ func (c *Node) heartbeatLoop() {
 				c.logger.Error(
 					"failed to re-register after heartbeat failure",
 					"id", c.cfg.ID,
-					"consecutive_failures", c.heartbeatFailures,
+					"consecutive_failures", failures,
 					"err", "missing registered endpoints",
 				)
 				continue
 			}
 
-			if err := c.register(context.Background(), endpoints); err != nil {
+			if err := c.register(ctx, endpoints); err != nil {
+				if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return
+				}
 				c.logger.Error(
 					"failed to re-register after heartbeat failure",
 					"id", c.cfg.ID,
-					"consecutive_failures", c.heartbeatFailures,
+					"consecutive_failures", failures,
 					"err", err,
 				)
 				continue
 			}
 
-			c.heartbeatFailures = 0
+			c.heartbeatFailures.Store(0)
 			c.logger.Info("re-registered after heartbeat failure", "id", c.cfg.ID)
 		}
 	}

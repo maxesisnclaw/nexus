@@ -36,6 +36,7 @@ def test_node_handle_serve_call_local_uds_roundtrip(
     _wait_for_service(registry_socket_path, "echo")
 
     client = Node(name="caller", id="caller-1", registry_addr=registry_socket_path)
+    client._local_node_id = "test-node"
     try:
         resp = client.call("echo", "echo", b"hello")
         assert resp.payload == b"hello"
@@ -51,6 +52,7 @@ def test_node_context_manager(mock_registry: object, registry_socket_path: str, 
         _wait_for_service(registry_socket_path, "ctx")
 
         with Node(name="caller", id="caller-ctx", registry_addr=registry_socket_path) as client:
+            client._local_node_id = "test-node"
             resp = client.call("ctx", "ping", b"")
             assert resp.payload == b"pong"
 
@@ -80,6 +82,7 @@ def test_node_multiple_handlers(
     _wait_for_service(registry_socket_path, "multi")
 
     client = Node(name="caller", id="caller-multi", registry_addr=registry_socket_path)
+    client._local_node_id = "test-node"
     try:
         assert client.call("multi", "one", b"40").payload == b"41"
         assert client.call("multi", "two", b"40").payload == b"42"
@@ -104,6 +107,7 @@ def test_call_to_nonexistent_handler_returns_error(
     _wait_for_service(registry_socket_path, "errors")
 
     client = Node(name="caller", id="caller-errors", registry_addr=registry_socket_path)
+    client._local_node_id = "test-node"
     try:
         with pytest.raises(RuntimeError, match="handler not found"):
             client.call("errors", "missing", b"x")
@@ -115,6 +119,11 @@ def test_call_to_nonexistent_handler_returns_error(
 def test_node_rejects_non_loopback_tcp_without_override(registry_socket_path: str) -> None:
     with pytest.raises(ValueError, match="Refusing non-loopback TCP listen address"):
         Node(name="tcp", id="tcp-1", tcp_addr="0.0.0.0:0", registry_addr=registry_socket_path)
+
+
+def test_node_rejects_empty_host_tcp_without_override(registry_socket_path: str) -> None:
+    with pytest.raises(ValueError, match="Refusing non-loopback TCP listen address"):
+        Node(name="tcp", id="tcp-1-empty", tcp_addr=":0", registry_addr=registry_socket_path)
 
 
 def test_node_tcp_listener_enforces_loopback(registry_socket_path: str) -> None:
@@ -244,7 +253,7 @@ def test_call_allows_non_loopback_tcp_with_override(monkeypatch: Any, registry_s
 def test_call_timeout_retries_and_raises_descriptive_error(monkeypatch: Any, registry_socket_path: str) -> None:
     class _RemoteRegistry:
         def lookup(self, _: str) -> list[dict[str, object]]:
-            return [{"id": "echo-timeout-1", "node": "remote-node", "endpoints": [{"type": "uds", "addr": "/tmp/echo-timeout.sock"}]}]
+            return [{"id": "echo-timeout-1", "node": "remote-node", "endpoints": [{"type": "tcp", "addr": "127.0.0.1:9010"}]}]
 
         def unregister(self, _: str) -> None:
             return
@@ -270,7 +279,7 @@ def test_call_timeout_retries_and_raises_descriptive_error(monkeypatch: Any, reg
             self.conns: list[_FakeConn] = []
 
         def get(self, _addr: str, *, use_tcp: bool, timeout: float | None = None) -> _FakeConn:
-            assert use_tcp is False
+            assert use_tcp
             assert timeout is not None
             self.get_calls += 1
             conn = _FakeConn()
@@ -279,7 +288,7 @@ def test_call_timeout_retries_and_raises_descriptive_error(monkeypatch: Any, reg
             return conn
 
         def put(self, _addr: str, _conn: _FakeConn, *, use_tcp: bool) -> None:
-            assert use_tcp is False
+            assert use_tcp
             self.put_calls += 1
 
         def close_all(self) -> None:
@@ -339,6 +348,7 @@ def test_pick_endpoint_prefers_local_uds_and_remote_tcp(registry_socket_path: st
             ],
         }
         remote_only_uds_instance = {
+            "id": "remote-only-1",
             "node": "remote-node",
             "endpoints": [{"type": "uds", "addr": "/tmp/remote-only.sock"}],
         }
@@ -346,7 +356,13 @@ def test_pick_endpoint_prefers_local_uds_and_remote_tcp(registry_socket_path: st
         local_addr, local_use_tcp = node._pick_endpoint(local_instance)
         remote_addr, remote_use_tcp = node._pick_endpoint(remote_instance)
         unknown_addr, unknown_use_tcp = node._pick_endpoint(unknown_instance)
-        fallback_addr, fallback_use_tcp = node._pick_endpoint(remote_only_uds_instance)
+        with pytest.raises(
+            ConnectionError,
+            match=(
+                "remote instance remote-only-1 has no TCP endpoint; refusing UDS fallback for non-local target"
+            ),
+        ):
+            node._pick_endpoint(remote_only_uds_instance)
 
         assert local_addr == "/tmp/local.sock"
         assert local_use_tcp is False
@@ -354,7 +370,5 @@ def test_pick_endpoint_prefers_local_uds_and_remote_tcp(registry_socket_path: st
         assert remote_use_tcp is True
         assert unknown_addr == "127.0.0.1:9002"
         assert unknown_use_tcp is True
-        assert fallback_addr == "/tmp/remote-only.sock"
-        assert fallback_use_tcp is False
     finally:
         node.close()

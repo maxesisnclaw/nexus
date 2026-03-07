@@ -13,6 +13,7 @@ import (
 
 	"github.com/maxesisn/nexus/pkg/config"
 	"github.com/maxesisn/nexus/pkg/daemon"
+	"github.com/maxesisn/nexus/pkg/registry"
 )
 
 func TestNewUsesRemoteRegistryWhenRegistryAddrSet(t *testing.T) {
@@ -117,7 +118,8 @@ func TestRegistryClientRequestDeadline(t *testing.T) {
 	}()
 
 	oldDeadline := registryClientIODeadline
-	registryClientIODeadline = 30 * time.Millisecond
+	ioDeadline := 30 * time.Millisecond
+	registryClientIODeadline = ioDeadline
 	defer func() {
 		registryClientIODeadline = oldDeadline
 	}()
@@ -138,6 +140,129 @@ func TestRegistryClientRequestDeadline(t *testing.T) {
 	}
 	if elapsed > 500*time.Millisecond {
 		t.Fatalf("expected request to fail fast due to I/O deadline, elapsed=%s", elapsed)
+	}
+}
+
+func TestRegistryClientWatchAckDeadline(t *testing.T) {
+	socket := filepath.Join("/tmp", fmt.Sprintf("nexus-sdk-registry-watch-ack-deadline-%d.sock", time.Now().UnixNano()))
+	t.Cleanup(func() { _ = os.Remove(socket) })
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer listener.Close()
+
+	accepted := make(chan struct{})
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		close(accepted)
+		defer conn.Close()
+		var req registryRequest
+		_ = readRegistryMessage(conn, &req)
+		time.Sleep(200 * time.Millisecond)
+	}()
+
+	oldDeadline := registryClientIODeadline
+	ioDeadline := 30 * time.Millisecond
+	registryClientIODeadline = ioDeadline
+	defer func() {
+		registryClientIODeadline = oldDeadline
+	}()
+
+	client := newRegistryClient(socket, "node-a", slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	defer client.Close()
+
+	start := time.Now()
+	unsubscribe := client.Watch("svc-watch-deadline", func(registry.ChangeEvent) {})
+	elapsed := time.Since(start)
+
+	if unsubscribe != nil {
+		t.Fatal("expected nil unsubscribe when watch ack times out")
+	}
+	select {
+	case <-accepted:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("server did not accept registry client watch connection")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("expected watch to fail fast due to ack deadline, elapsed=%s", elapsed)
+	}
+}
+
+func TestRegistryClientWatchClearsDeadlineAfterAck(t *testing.T) {
+	socket := filepath.Join("/tmp", fmt.Sprintf("nexus-sdk-registry-watch-clear-deadline-%d.sock", time.Now().UnixNano()))
+	t.Cleanup(func() { _ = os.Remove(socket) })
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer listener.Close()
+
+	oldDeadline := registryClientIODeadline
+	ioDeadline := 30 * time.Millisecond
+	registryClientIODeadline = ioDeadline
+	defer func() {
+		registryClientIODeadline = oldDeadline
+	}()
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+
+		var req registryRequest
+		if err := readRegistryMessage(conn, &req); err != nil {
+			return
+		}
+		if req.Cmd != "watch" {
+			return
+		}
+		if err := writeRegistryMessage(conn, controlReply{OK: true}); err != nil {
+			return
+		}
+
+		time.Sleep(3 * ioDeadline)
+		_ = writeRegistryMessage(conn, registryWatchEvent{
+			Event: "up",
+			Instance: registry.ServiceInstance{
+				Name: "svc-watch",
+				ID:   "svc-watch-1",
+			},
+		})
+	}()
+
+	client := newRegistryClient(socket, "node-a", slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	defer client.Close()
+
+	events := make(chan registry.ChangeEvent, 1)
+	unsubscribe := client.Watch("svc-watch", func(ev registry.ChangeEvent) {
+		events <- ev
+	})
+	if unsubscribe == nil {
+		t.Fatal("expected non-nil unsubscribe for successful watch")
+	}
+	defer unsubscribe()
+
+	select {
+	case ev := <-events:
+		if ev.Type != registry.ChangeUp || ev.Instance.ID != "svc-watch-1" {
+			t.Fatalf("unexpected watch event: %+v", ev)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timeout waiting for watch event after ack")
+	}
+
+	select {
+	case <-serverDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timeout waiting for watch server goroutine to exit")
 	}
 }
 
