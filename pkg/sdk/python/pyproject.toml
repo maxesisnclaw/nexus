@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta:__legacy__"
+
+[project]
+name = "nexus-sdk"
+version = "0.4.0"
+description = "Nexus microservice framework Python SDK"
+requires-python = ">=3.10"
+dependencies = ["msgpack>=1.0"]
+
+[project.optional-dependencies]
+noise = ["dissononce>=0.34"]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

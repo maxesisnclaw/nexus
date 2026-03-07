@@ -1,0 +1,416 @@
+"""Nexus Node API for serving handlers and making RPC calls."""
+
+from __future__ import annotations
+
+import os
+import socket
+import stat
+import threading
+import time
+from dataclasses import dataclass
+from typing import Callable
+
+from .pool import ConnectionPool
+from .registry import RegistryClient
+from .transport import recv_message, send_message
+
+DEFAULT_REGISTRY_ADDR = "/run/nexus/registry.sock"
+_HEARTBEAT_INTERVAL_SECONDS = 5.0
+
+
+@dataclass
+class Request:
+    """Inbound RPC request."""
+
+    method: str
+    payload: bytes
+    headers: dict[str, str]
+
+
+@dataclass
+class Response:
+    """Outbound RPC response."""
+
+    payload: bytes
+    headers: dict[str, str] | None = None
+
+
+class Node:
+    """Nexus mesh participant - serves handlers and makes RPC calls."""
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        id: str | None = None,
+        uds_addr: str | None = None,
+        tcp_addr: str | None = None,
+        registry_addr: str | None = None,
+        capabilities: list[str] | None = None,
+    ):
+        if not name:
+            raise ValueError("name is required")
+        self._name = name
+        self._id = id or name
+        self._uds_addr = uds_addr
+        self._tcp_addr = tcp_addr
+        self._registry = RegistryClient(registry_addr or DEFAULT_REGISTRY_ADDR)
+        self._capabilities = list(capabilities or [])
+        self._pool = ConnectionPool()
+
+        self._handlers: dict[str, Callable[[Request], Response]] = {}
+        self._handlers_lock = threading.Lock()
+
+        self._state_lock = threading.Lock()
+        self._state = "new"
+        self._registered = False
+
+        self._stop = threading.Event()
+        self._serve_thread: threading.Thread | None = None
+        self._heartbeat_thread: threading.Thread | None = None
+        self._listeners: list[socket.socket] = []
+        self._accept_threads: list[threading.Thread] = []
+        self._conn_threads: set[threading.Thread] = set()
+        self._active_conns: set[socket.socket] = set()
+        self._conn_lock = threading.Lock()
+
+        self._rr_lock = threading.Lock()
+        self._rr_offsets: dict[str, int] = {}
+
+    def handle(self, method: str, handler: Callable[[Request], Response]) -> None:
+        """Register a handler for an RPC method."""
+        if not method:
+            raise ValueError("method is required")
+        with self._handlers_lock:
+            self._handlers[method] = handler
+
+    def serve(self, *, timeout: float | None = None) -> None:
+        """Start serving (blocking). Registers with registry, starts heartbeat."""
+        self._start_serving()
+        started = time.monotonic()
+        try:
+            while not self._stop.is_set():
+                if timeout is not None and (time.monotonic() - started) >= timeout:
+                    break
+                time.sleep(0.05)
+        finally:
+            self.close()
+
+    def serve_async(self) -> None:
+        """Start serving in a background thread."""
+        with self._state_lock:
+            if self._state in {"starting", "serving"}:
+                return
+            if self._state == "closed":
+                raise RuntimeError("node is closed")
+            self._state = "starting"
+            self._serve_thread = threading.Thread(target=self.serve, name=f"nexus-node-{self._id}", daemon=True)
+            self._serve_thread.start()
+
+    def call(self, service: str, method: str, payload: bytes) -> Response:
+        """Make an RPC call to a remote service."""
+        if not service:
+            raise ValueError("service is required")
+        if not method:
+            raise ValueError("method is required")
+
+        instances = self._registry.lookup(service)
+        if not instances:
+            raise RuntimeError(f"service {service!r} not found")
+
+        instance = self._pick_instance(service, instances)
+        addr, use_tcp = self._pick_endpoint(instance)
+        conn = self._pool.get(addr, use_tcp=use_tcp)
+
+        reusable = True
+        try:
+            send_message(conn, {"method": method, "payload": payload, "headers": {}})
+            resp = recv_message(conn)
+        except Exception:
+            reusable = False
+            try:
+                conn.close()
+            except OSError:
+                pass
+            raise
+        finally:
+            if reusable:
+                self._pool.put(addr, conn, use_tcp=use_tcp)
+
+        headers = resp.get("headers")
+        if not isinstance(headers, dict):
+            headers = {}
+        error = headers.get("error")
+        if error:
+            raise RuntimeError(str(error))
+        body = resp.get("payload", b"")
+        if not isinstance(body, (bytes, bytearray)):
+            raise RuntimeError("invalid response payload")
+        return Response(payload=bytes(body), headers=headers)
+
+    def close(self) -> None:
+        """Stop serving and clean up."""
+        with self._state_lock:
+            if self._state == "closed":
+                return
+            self._state = "closed"
+
+        self._stop.set()
+
+        for listener in self._listeners:
+            try:
+                listener.close()
+            except OSError:
+                pass
+
+        with self._conn_lock:
+            active_conns = list(self._active_conns)
+        for conn in active_conns:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+        for thread in list(self._accept_threads):
+            if thread.is_alive() and thread is not threading.current_thread():
+                thread.join(timeout=1.0)
+
+        with self._conn_lock:
+            conn_threads = list(self._conn_threads)
+        for thread in conn_threads:
+            if thread.is_alive() and thread is not threading.current_thread():
+                thread.join(timeout=1.0)
+
+        if self._registered:
+            try:
+                self._registry.unregister(self._id)
+            except Exception:
+                pass
+            self._registered = False
+
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive() and self._heartbeat_thread is not threading.current_thread():
+            self._heartbeat_thread.join(timeout=1.0)
+
+        self._pool.close_all()
+        self._registry.close()
+
+        if self._uds_addr:
+            self._cleanup_socket_path(self._uds_addr, strict=False)
+
+    def __enter__(self) -> Node:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def _start_serving(self) -> None:
+        with self._state_lock:
+            if self._state == "closed":
+                raise RuntimeError("node is closed")
+            if self._state == "serving":
+                raise RuntimeError("node is already serving")
+            if self._state not in {"new", "starting"}:
+                raise RuntimeError(f"node is in invalid state: {self._state}")
+            self._state = "serving"
+
+        listeners: list[socket.socket] = []
+        endpoints: list[dict[str, str]] = []
+
+        try:
+            if self._uds_addr:
+                uds_listener = self._create_uds_listener(self._uds_addr)
+                listeners.append(uds_listener)
+                endpoints.append({"type": "uds", "addr": self._uds_addr})
+            if self._tcp_addr:
+                tcp_listener = self._create_tcp_listener(self._tcp_addr)
+                listeners.append(tcp_listener)
+                host, port = tcp_listener.getsockname()[:2]
+                endpoints.append({"type": "tcp", "addr": f"{host}:{port}"})
+            if not listeners:
+                raise ValueError("at least one of uds_addr or tcp_addr is required")
+
+            self._listeners = listeners
+            self._registry.register(
+                self._name,
+                self._id,
+                endpoints=endpoints,
+                capabilities=self._capabilities,
+                ttl_ms=15000,
+            )
+            self._registered = True
+
+            self._heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                name=f"nexus-heartbeat-{self._id}",
+                daemon=True,
+            )
+            self._heartbeat_thread.start()
+
+            for listener in listeners:
+                thread = threading.Thread(target=self._accept_loop, args=(listener,), daemon=True)
+                self._accept_threads.append(thread)
+                thread.start()
+        except Exception:
+            for listener in listeners:
+                try:
+                    listener.close()
+                except OSError:
+                    pass
+            with self._state_lock:
+                if self._state != "closed":
+                    self._state = "new"
+            raise
+
+    def _accept_loop(self, listener: socket.socket) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                if self._stop.is_set():
+                    return
+                return
+
+            conn_thread = threading.Thread(target=self._serve_conn, args=(conn,), daemon=True)
+            with self._conn_lock:
+                self._conn_threads.add(conn_thread)
+            conn_thread.start()
+
+    def _serve_conn(self, conn: socket.socket) -> None:
+        with self._conn_lock:
+            self._active_conns.add(conn)
+        try:
+            with conn:
+                while not self._stop.is_set():
+                    try:
+                        req = recv_message(conn)
+                    except (EOFError, OSError, ValueError):
+                        return
+
+                    method = str(req.get("method") or "")
+                    payload = req.get("payload", b"")
+                    headers = req.get("headers")
+                    if not isinstance(headers, dict):
+                        headers = {}
+
+                    if not isinstance(payload, (bytes, bytearray)):
+                        send_message(conn, {"method": method, "payload": b"", "headers": {"error": "invalid payload"}})
+                        continue
+
+                    with self._handlers_lock:
+                        handler = self._handlers.get(method)
+                    if handler is None:
+                        send_message(
+                            conn,
+                            {
+                                "method": method,
+                                "payload": b"",
+                                "headers": {"error": f"handler not found: {method}"},
+                            },
+                        )
+                        continue
+
+                    try:
+                        resp = handler(Request(method=method, payload=bytes(payload), headers=headers))
+                    except Exception as exc:
+                        send_message(conn, {"method": method, "payload": b"", "headers": {"error": str(exc)}})
+                        continue
+
+                    resp_headers = resp.headers or {}
+                    send_message(
+                        conn,
+                        {
+                            "method": method,
+                            "payload": resp.payload,
+                            "headers": resp_headers,
+                        },
+                    )
+        finally:
+            with self._conn_lock:
+                self._active_conns.discard(conn)
+                current = threading.current_thread()
+                self._conn_threads.discard(current)
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stop.wait(_HEARTBEAT_INTERVAL_SECONDS):
+            try:
+                self._registry.heartbeat(self._id)
+            except Exception:
+                continue
+
+    def _pick_instance(self, service: str, instances: list[dict[str, object]]) -> dict[str, object]:
+        with self._rr_lock:
+            idx = self._rr_offsets.get(service, 0) % len(instances)
+            self._rr_offsets[service] = (idx + 1) % len(instances)
+        return instances[idx]
+
+    @staticmethod
+    def _pick_endpoint(instance: dict[str, object]) -> tuple[str, bool]:
+        endpoints = instance.get("endpoints")
+        if not isinstance(endpoints, list):
+            raise RuntimeError("instance has no endpoints")
+
+        tcp_addr: str | None = None
+        for endpoint in endpoints:
+            if not isinstance(endpoint, dict):
+                continue
+            kind = endpoint.get("type")
+            addr = endpoint.get("addr")
+            if not isinstance(addr, str) or not addr:
+                continue
+            if kind == "uds":
+                return addr, False
+            if kind == "tcp":
+                tcp_addr = addr
+        if tcp_addr:
+            return tcp_addr, True
+        raise RuntimeError("instance has no usable endpoints")
+
+    @staticmethod
+    def _create_uds_listener(path: str) -> socket.socket:
+        Node._cleanup_socket_path(path, strict=True)
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, mode=0o700, exist_ok=True)
+
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(path)
+        os.chmod(path, 0o600)
+        listener.listen(128)
+        listener.settimeout(1.0)
+        return listener
+
+    @staticmethod
+    def _create_tcp_listener(addr: str) -> socket.socket:
+        host, port_text = addr.rsplit(":", 1)
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((host, int(port_text)))
+        listener.listen(128)
+        listener.settimeout(1.0)
+        return listener
+
+    @staticmethod
+    def _cleanup_socket_path(path: str, strict: bool) -> None:
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            if strict:
+                raise RuntimeError(f"stat existing socket path failed: {path}: {exc}") from exc
+            return
+
+        if not stat.S_ISSOCK(info.st_mode):
+            if strict:
+                raise RuntimeError(f"uds path exists and is not a socket: {path}")
+            return
+
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            if strict:
+                raise RuntimeError(f"cleanup stale socket failed: {path}: {exc}") from exc
