@@ -163,12 +163,25 @@ func (c *Client) Call(serviceName, method string, payload []byte) (*Response, er
 	return c.callWithRetry(serviceName, method, payload, false)
 }
 
+// CallContext invokes a method with caller-provided context for cancellation and deadlines.
+func (c *Client) CallContext(ctx context.Context, serviceName, method string, payload []byte) (*Response, error) {
+	return c.callWithRetryCtx(ctx, serviceName, method, payload, false)
+}
+
 // CallWithData attempts fd-based transfer on local UDS and falls back to Call.
 func (c *Client) CallWithData(serviceName, method string, payload []byte) (*Response, error) {
 	if len(payload) < c.cfg.LargePayloadThreshold {
 		return c.callWithRetry(serviceName, method, payload, false)
 	}
 	return c.callWithRetry(serviceName, method, payload, true)
+}
+
+// CallWithDataContext attempts fd-based transfer with caller-provided context.
+func (c *Client) CallWithDataContext(ctx context.Context, serviceName, method string, payload []byte) (*Response, error) {
+	if len(payload) < c.cfg.LargePayloadThreshold {
+		return c.callWithRetryCtx(ctx, serviceName, method, payload, false)
+	}
+	return c.callWithRetryCtx(ctx, serviceName, method, payload, true)
 }
 
 func (c *Client) callWithRetry(serviceName, method string, payload []byte, preferFD bool) (*Response, error) {
@@ -183,6 +196,26 @@ func (c *Client) callWithRetry(serviceName, method string, payload []byte, prefe
 			break
 		}
 		time.Sleep(c.cfg.RetryBackoff)
+	}
+	return nil, lastErr
+}
+
+func (c *Client) callWithRetryCtx(ctx context.Context, serviceName, method string, payload []byte, preferFD bool) (*Response, error) {
+	var lastErr error
+	for attempt := 0; attempt <= c.cfg.CallRetries; attempt++ {
+		resp, err := c.callOnceCtx(ctx, serviceName, method, payload, preferFD)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if attempt == c.cfg.CallRetries {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(c.cfg.RetryBackoff):
+		}
 	}
 	return nil, lastErr
 }
@@ -246,8 +279,71 @@ func (c *Client) callOnce(serviceName, method string, payload []byte, preferFD b
 	return &Response{Payload: resp.Payload, Headers: resp.Headers}, nil
 }
 
+func (c *Client) callOnceCtx(ctx context.Context, serviceName, method string, payload []byte, preferFD bool) (*Response, error) {
+	inst, err := c.discovery.Pick(serviceName)
+	if err != nil {
+		return nil, err
+	}
+	endpoint, err := endpointFromInstance(inst, c.localNodeID)
+	if err != nil {
+		return nil, err
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, c.cfg.RequestTimeout)
+	defer cancel()
+	conn, err := c.connPool.Acquire(reqCtx, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	reusable := true
+	defer func() {
+		c.connPool.Release(endpoint, conn, reusable)
+	}()
+
+	if !preferFD {
+		resp, connHealthy, err := c.callMsgpack(conn, method, payload)
+		reusable = connHealthy
+		return resp, err
+	}
+
+	fd, err := createMemfd("nexus-call", payload)
+	if err != nil {
+		resp, connHealthy, err := c.callMsgpack(conn, method, payload)
+		reusable = connHealthy
+		return resp, err
+	}
+	defer syscall.Close(fd)
+
+	setup := &transport.Message{Method: fdCallMethod, Headers: map[string]string{"method": method}}
+	if err := conn.Send(setup); err != nil {
+		reusable = false
+		return c.callMsgpackFallbackCtx(reqCtx, endpoint, method, payload)
+	}
+	ack, err := conn.Recv()
+	if err != nil || ack.Headers[fdReadyKey] != "1" {
+		reusable = false
+		return c.callMsgpackFallbackCtx(reqCtx, endpoint, method, payload)
+	}
+	if err := conn.SendFd(fd, []byte("fd")); err != nil {
+		reusable = false
+		return c.callMsgpackFallbackCtx(reqCtx, endpoint, method, payload)
+	}
+	resp, err := conn.Recv()
+	if err != nil {
+		reusable = false
+		return nil, err
+	}
+	if msgErr, ok := resp.Headers["error"]; ok {
+		return nil, errors.New(msgErr)
+	}
+	return &Response{Payload: resp.Payload, Headers: resp.Headers}, nil
+}
+
 func (c *Client) callMsgpackFallback(endpoint transport.ServiceEndpoint, method string, payload []byte) (*Response, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.RequestTimeout)
+	return c.callMsgpackFallbackCtx(context.Background(), endpoint, method, payload)
+}
+
+func (c *Client) callMsgpackFallbackCtx(ctx context.Context, endpoint transport.ServiceEndpoint, method string, payload []byte) (*Response, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.cfg.RequestTimeout)
 	defer cancel()
 	conn, err := c.connPool.Acquire(ctx, endpoint)
 	if err != nil {
@@ -288,6 +384,7 @@ func (c *Client) Serve(ctx context.Context) error {
 	c.mu.Unlock()
 
 	c.register(endpoints)
+	defer c.Close()
 	go c.heartbeatLoop()
 	go func() {
 		<-ctx.Done()

@@ -51,11 +51,16 @@ type prefixWriter struct {
 	buf    []byte
 }
 
+const maxLineLength = 64 * 1024
+
 func (w *prefixWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.buf = append(w.buf, p...)
 	w.flushLocked(false)
+	if len(w.buf) > maxLineLength {
+		w.flushLocked(true)
+	}
 	return len(p), nil
 }
 
