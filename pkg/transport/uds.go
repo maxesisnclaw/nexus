@@ -54,8 +54,8 @@ func (t *UDSTransport) Listen(_ context.Context, addr string) (Listener, error) 
 		return nil, fmt.Errorf("uds listen %s: %w", addr, err)
 	}
 	if err := os.Chmod(addr, 0o600); err != nil {
-		ln.Close()
-		return nil, fmt.Errorf("chmod uds socket: %w", err)
+		closeErr := ln.Close()
+		return nil, errors.Join(fmt.Errorf("chmod uds socket: %w", err), closeErr)
 	}
 	return &udsListener{ln: ln, path: addr}, nil
 }

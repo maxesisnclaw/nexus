@@ -10,10 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
         with:
           go-version-file: go.mod
 
@@ -45,7 +45,7 @@ jobs:
     needs: go-checks
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
       - name: Build test image
         run: docker build -t nexus-test -f Dockerfile.test .
@@ -54,7 +54,7 @@ jobs:
         run: docker run --rm -v ${{ github.workspace }}:/workspace -w /workspace nexus-test go test -v -race ./...
 
       - name: Run Linux integration tests in container
-        run: docker run --rm --privileged -v ${{ github.workspace }}:/workspace -w /workspace nexus-test go test -v -tags integration ./...
+        run: docker run --rm --cap-add SYS_PTRACE --cap-add NET_ADMIN -v ${{ github.workspace }}:/workspace -w /workspace nexus-test go test -v -tags integration ./...
 
       - name: Run Linux integration race tests in container
-        run: docker run --rm --privileged -v ${{ github.workspace }}:/workspace -w /workspace nexus-test go test -v -race -tags integration ./...
+        run: docker run --rm --cap-add SYS_PTRACE --cap-add NET_ADMIN -v ${{ github.workspace }}:/workspace -w /workspace nexus-test go test -v -race -tags integration ./...

@@ -99,6 +99,10 @@ type Client struct {
 	registered bool
 	closeOnce  sync.Once
 	closeErr   error
+
+	activeConns   map[transport.Conn]struct{}
+	activeConnsMu sync.Mutex
+	activeWg      sync.WaitGroup
 }
 
 // New creates a new SDK client instance.
@@ -153,6 +157,7 @@ func New(cfg Config) (*Client, error) {
 		handlers:    make(map[string]Handler),
 		heartbeat:   make(chan struct{}),
 		localNodeID: cfg.Registry.NodeID(),
+		activeConns: make(map[transport.Conn]struct{}),
 	}, nil
 }
 
@@ -439,8 +444,18 @@ func (c *Client) Serve(ctx context.Context) error {
 			}
 			select {
 			case connSem <- struct{}{}:
+				c.activeConnsMu.Lock()
+				c.activeConns[result.conn] = struct{}{}
+				c.activeConnsMu.Unlock()
+				c.activeWg.Add(1)
 				go func(conn transport.Conn) {
 					defer func() { <-connSem }()
+					defer func() {
+						c.activeConnsMu.Lock()
+						delete(c.activeConns, conn)
+						c.activeConnsMu.Unlock()
+						c.activeWg.Done()
+					}()
 					c.serveConn(conn)
 				}(result.conn)
 			default:
@@ -455,7 +470,6 @@ func (c *Client) Serve(ctx context.Context) error {
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		c.mu.Lock()
-		defer c.mu.Unlock()
 		if c.registered {
 			c.registry.Unregister(c.cfg.ID)
 			c.registered = false
@@ -465,6 +479,15 @@ func (c *Client) Close() error {
 			c.closeErr = c.listener.Close()
 			c.listener = nil
 		}
+		c.mu.Unlock()
+
+		c.activeConnsMu.Lock()
+		for conn := range c.activeConns {
+			_ = conn.Close()
+		}
+		c.activeConnsMu.Unlock()
+
+		c.mu.Lock()
 		poolErr := c.connPool.Close()
 		if c.closeErr != nil || poolErr != nil {
 			c.closeErr = errors.Join(c.closeErr, poolErr)
@@ -472,7 +495,9 @@ func (c *Client) Close() error {
 		if c.ownsReg {
 			c.registry.Close()
 		}
+		c.mu.Unlock()
 	})
+	c.activeWg.Wait()
 	return c.closeErr
 }
 
@@ -580,13 +605,19 @@ func (c *Client) serveConn(conn transport.Conn) {
 			}
 			fd, _, err := conn.RecvFd()
 			if err != nil {
-				_ = conn.Send(&transport.Message{Headers: map[string]string{"error": err.Error()}})
+				if err := conn.Send(&transport.Message{Headers: map[string]string{"error": err.Error()}}); err != nil {
+					c.logger.Debug("send failed", "err", err)
+					return
+				}
 				continue
 			}
 			data, err := transport.ReadFDAll(fd)
 			_ = syscall.Close(fd)
 			if err != nil {
-				_ = conn.Send(&transport.Message{Headers: map[string]string{"error": err.Error()}})
+				if err := conn.Send(&transport.Message{Headers: map[string]string{"error": err.Error()}}); err != nil {
+					c.logger.Debug("send failed", "err", err)
+					return
+				}
 				continue
 			}
 			if req.Headers == nil {
@@ -598,10 +629,16 @@ func (c *Client) serveConn(conn transport.Conn) {
 
 		resp, err := c.dispatch(req)
 		if err != nil {
-			_ = conn.Send(&transport.Message{Headers: map[string]string{"error": err.Error()}})
+			if err := conn.Send(&transport.Message{Headers: map[string]string{"error": err.Error()}}); err != nil {
+				c.logger.Debug("send failed", "err", err)
+				return
+			}
 			continue
 		}
-		_ = conn.Send(&transport.Message{Method: req.Method, Payload: resp.Payload, Headers: resp.Headers})
+		if err := conn.Send(&transport.Message{Method: req.Method, Payload: resp.Payload, Headers: resp.Headers}); err != nil {
+			c.logger.Debug("send failed", "err", err)
+			return
+		}
 	}
 }
 
