@@ -305,9 +305,12 @@ func TestIsPIDAliveInvalidAndCurrentProcess(t *testing.T) {
 func TestNewHealthMonitorDefaultInterval(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	pm := NewProcessManager(logger, time.Second)
-	h := NewHealthMonitor(logger, pm, 0)
+	h := NewHealthMonitor(logger, pm, 0, 0)
 	if h.interval <= 0 {
 		t.Fatalf("expected default interval, got %s", h.interval)
+	}
+	if h.maxRestarts != 5 {
+		t.Fatalf("expected default max restarts 5, got %d", h.maxRestarts)
 	}
 }
 
@@ -325,7 +328,7 @@ func TestHealthMonitorRestartsUnhealthyProcess(t *testing.T) {
 		Spec:          config.ServiceSpec{Name: "worker", Runtime: "docker", Image: "repo/worker:latest"},
 		containerName: "nexus-worker",
 	}
-	h := NewHealthMonitor(logger, pm, 100*time.Millisecond)
+	h := NewHealthMonitor(logger, pm, 100*time.Millisecond, 5)
 
 	h.checkOnce(context.Background())
 
@@ -337,13 +340,13 @@ func TestHealthMonitorRestartsUnhealthyProcess(t *testing.T) {
 func TestHealthMonitorCleansStaleRestartEntries(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	pm := NewProcessManager(logger, time.Second)
-	h := NewHealthMonitor(logger, pm, 100*time.Millisecond)
-	h.restart["stale"] = time.Now().Add(-time.Minute)
+	h := NewHealthMonitor(logger, pm, 100*time.Millisecond, 5)
+	h.restartState["stale"] = restartState{consecutiveFailures: 1, lastAttempt: time.Now().Add(-time.Minute)}
 
 	h.checkOnce(context.Background())
 
-	if len(h.restart) != 0 {
-		t.Fatalf("expected stale restart map to be cleaned, got %+v", h.restart)
+	if len(h.restartState) != 0 {
+		t.Fatalf("expected stale restart map to be cleaned, got %+v", h.restartState)
 	}
 }
 
@@ -362,20 +365,122 @@ func TestHealthMonitorKeepsRestartStateForActiveProcess(t *testing.T) {
 		containerName: "nexus-worker",
 	}
 
-	h := NewHealthMonitor(logger, pm, time.Second)
-	h.restart["worker"] = time.Now()
-	h.restart["stale"] = time.Now().Add(-time.Minute)
+	h := NewHealthMonitor(logger, pm, time.Second, 5)
+	h.restartState["worker"] = restartState{consecutiveFailures: 1, lastAttempt: time.Now()}
+	h.restartState["stale"] = restartState{consecutiveFailures: 1, lastAttempt: time.Now().Add(-time.Minute)}
 
 	h.checkOnce(context.Background())
 
-	if _, ok := h.restart["stale"]; ok {
-		t.Fatalf("expected stale restart entry to be removed, got %+v", h.restart)
+	if _, ok := h.restartState["stale"]; ok {
+		t.Fatalf("expected stale restart entry to be removed, got %+v", h.restartState)
 	}
-	if _, ok := h.restart["worker"]; !ok {
-		t.Fatalf("expected active restart entry to be preserved, got %+v", h.restart)
+	if _, ok := h.restartState["worker"]; !ok {
+		t.Fatalf("expected active restart entry to be preserved, got %+v", h.restartState)
 	}
 	if pm.IsRunning("worker") {
 		t.Fatal("expected restart throttle to prevent immediate restart")
+	}
+}
+
+func TestHealthMonitorExponentialBackoff(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pm := NewProcessManager(logger, time.Second)
+	h := NewHealthMonitor(logger, pm, time.Second, 5)
+
+	now := time.Unix(1000, 0)
+	if !h.shouldRestart("worker", now) {
+		t.Fatal("expected first restart attempt to be allowed")
+	}
+	if h.shouldRestart("worker", now.Add(500*time.Millisecond)) {
+		t.Fatal("expected second attempt to back off for at least base interval")
+	}
+	if !h.shouldRestart("worker", now.Add(1*time.Second)) {
+		t.Fatal("expected second attempt after base interval")
+	}
+	if h.shouldRestart("worker", now.Add(2500*time.Millisecond)) {
+		t.Fatal("expected third attempt to wait for doubled backoff")
+	}
+	if !h.shouldRestart("worker", now.Add(3*time.Second)) {
+		t.Fatal("expected third attempt after doubled backoff")
+	}
+
+	state, ok := h.restartState["worker"]
+	if !ok || state.consecutiveFailures != 3 {
+		t.Fatalf("unexpected restart state: %+v", state)
+	}
+}
+
+func TestHealthMonitorMaxRestartLimit(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pm := NewProcessManager(logger, time.Second)
+	pm.docker = &fakeDockerRuntime{
+		running: map[string]bool{
+			"nexus-worker": false,
+		},
+		keepDown: true,
+	}
+	pm.procs["worker"] = &ManagedProcess{
+		ID:            "worker",
+		Service:       "worker",
+		Spec:          config.ServiceSpec{Name: "worker", Runtime: "docker", Image: "repo/worker:latest"},
+		containerName: "nexus-worker",
+	}
+
+	h := NewHealthMonitor(logger, pm, 100*time.Millisecond, 3)
+	h.baseBackoff = 0
+	for i := 0; i < 6; i++ {
+		h.checkOnce(context.Background())
+	}
+
+	fake := pm.docker.(*fakeDockerRuntime)
+	if fake.startCalls != 3 {
+		t.Fatalf("expected exactly 3 restart attempts, got %d", fake.startCalls)
+	}
+	state, ok := h.restartState["worker"]
+	if !ok || !state.exhausted {
+		t.Fatalf("expected exhausted restart state, got %+v", state)
+	}
+}
+
+func TestHealthMonitorResetsOnHealthy(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pm := NewProcessManager(logger, time.Second)
+	fake := &fakeDockerRuntime{
+		running: map[string]bool{
+			"nexus-worker": false,
+		},
+		keepDown: true,
+	}
+	pm.docker = fake
+	pm.procs["worker"] = &ManagedProcess{
+		ID:            "worker",
+		Service:       "worker",
+		Spec:          config.ServiceSpec{Name: "worker", Runtime: "docker", Image: "repo/worker:latest"},
+		containerName: "nexus-worker",
+	}
+
+	h := NewHealthMonitor(logger, pm, 100*time.Millisecond, 5)
+	h.baseBackoff = 0
+
+	h.checkOnce(context.Background())
+	state, ok := h.restartState["worker"]
+	if !ok || state.consecutiveFailures != 1 {
+		t.Fatalf("expected one recorded failure, got %+v", state)
+	}
+
+	fake.keepDown = false
+	fake.running["nexus-worker"] = true
+	h.checkOnce(context.Background())
+	if _, ok := h.restartState["worker"]; ok {
+		t.Fatalf("expected restart state reset after healthy check, got %+v", h.restartState["worker"])
+	}
+
+	fake.keepDown = true
+	fake.running["nexus-worker"] = false
+	h.checkOnce(context.Background())
+	state, ok = h.restartState["worker"]
+	if !ok || state.consecutiveFailures != 1 {
+		t.Fatalf("expected failure counter reset to 1 after healthy cycle, got %+v", state)
 	}
 }
 
@@ -405,13 +510,18 @@ func TestProcessManagerStopServiceAggregatesErrors(t *testing.T) {
 }
 
 type fakeDockerRuntime struct {
-	running  map[string]bool
-	stopErrs map[string]error
+	running    map[string]bool
+	stopErrs   map[string]error
+	keepDown   bool
+	startCalls int
 }
 
 func (f *fakeDockerRuntime) Start(_ context.Context, proc *ManagedProcess) (string, error) {
 	name := "nexus-" + proc.ID
-	f.running[name] = true
+	f.startCalls++
+	if !f.keepDown {
+		f.running[name] = true
+	}
 	return name, nil
 }
 

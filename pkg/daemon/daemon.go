@@ -26,7 +26,7 @@ type Daemon struct {
 // New creates a daemon instance.
 func New(cfg *config.Config, logger *slog.Logger) *Daemon {
 	pm := NewProcessManager(logger, cfg.Daemon.ShutdownGrace.Duration)
-	health := NewHealthMonitor(logger, pm, cfg.Daemon.HealthInterval.Duration)
+	health := NewHealthMonitor(logger, pm, cfg.Daemon.HealthInterval.Duration, 5)
 	return &Daemon{cfg: cfg, logger: logger, pm: pm, health: health}
 }
 

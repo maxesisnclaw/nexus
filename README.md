@@ -110,6 +110,8 @@ volumes = ["/opt/app/postproc:/app"]
 network = "uds"
 ```
 
+`depends_on` and `health_check` are reserved configuration fields for future dependency/liveness orchestration and are not enforced by the current daemon.
+
 ## SDK Examples
 
 ### Go SDK

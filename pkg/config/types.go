@@ -25,14 +25,16 @@ type PeerConfig struct {
 
 // ServiceSpec describes one managed service entry.
 type ServiceSpec struct {
-	Name        string         `toml:"name"`
-	Type        string         `toml:"type"`
-	Runtime     string         `toml:"runtime"`
-	Binary      string         `toml:"binary"`
-	Image       string         `toml:"image"`
-	Args        []string       `toml:"args"`
-	Volumes     []string       `toml:"volumes"`
-	DependsOn   []string       `toml:"depends_on"`
+	Name    string   `toml:"name"`
+	Type    string   `toml:"type"`
+	Runtime string   `toml:"runtime"`
+	Binary  string   `toml:"binary"`
+	Image   string   `toml:"image"`
+	Args    []string `toml:"args"`
+	Volumes []string `toml:"volumes"`
+	// DependsOn lists service names this service depends on. Reserved for future use; currently not enforced by the daemon.
+	DependsOn []string `toml:"depends_on"`
+	// HealthCheck endpoint for liveness probing. Reserved for future use; currently not enforced by the daemon.
 	HealthCheck string         `toml:"health_check"`
 	Network     string         `toml:"network"`
 	Instances   []InstanceSpec `toml:"instances"`

@@ -89,6 +89,7 @@ binary = "/opt/app/preprocessor"
 args = ["--config", "/etc/app/preproc.toml"]
 depends_on = ["gateway"]
 health_check = "tcp://localhost:9001/health"
+# 注意：depends_on 和 health_check 目前为预留字段，当前版本 daemon 不会执行依赖排序或健康探针检查。
 
 # 多实例 worker
 [[service]]
@@ -279,6 +280,7 @@ CGO_ENABLED=0 go build -o nexusd ./cmd/nexusd/
 - [ ] 配置解析（TOML）
 - [ ] 进程管理（启动/停止/重启）
 - [ ] 健康检查（进程存活检测）
+- [ ] `depends_on` / `health_check` 配置生效（规划中，当前未实现）
 
 ### Phase 2：传输层
 - [ ] UDS transport + msgpack
