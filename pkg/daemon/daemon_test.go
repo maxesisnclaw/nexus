@@ -58,7 +58,10 @@ func TestDaemonStartStop(t *testing.T) {
 		}},
 	}
 
-	d := New(cfg, logger)
+	d, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
@@ -96,7 +99,10 @@ func TestDaemonStopPreservesSIGTERMHandling(t *testing.T) {
 		}},
 	}
 
-	d := New(cfg, logger)
+	d, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
@@ -167,7 +173,10 @@ func TestDaemonStartAlreadyStartedAndStopNoop(t *testing.T) {
 		},
 	}
 
-	d := New(cfg, logger)
+	d, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
@@ -198,7 +207,10 @@ func TestDaemonStartFailureResetsState(t *testing.T) {
 		}},
 	}
 
-	d := New(cfg, logger)
+	d, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := d.Start(ctx); err == nil {
@@ -211,13 +223,16 @@ func TestDaemonStartFailureResetsState(t *testing.T) {
 
 func TestDaemonRestartServiceNotFound(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	d := New(&config.Config{
+	d, err := New(&config.Config{
 		Daemon: config.DaemonConfig{
 			HealthInterval: config.Duration{Duration: 100 * time.Millisecond},
 			ShutdownGrace:  config.Duration{Duration: 1 * time.Second},
 		},
 	}, logger)
-	err := d.RestartService(context.Background(), "missing")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	err = d.RestartService(context.Background(), "missing")
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("expected not found error, got %v", err)
 	}

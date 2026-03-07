@@ -1,7 +1,7 @@
 package registry
 
 import (
-	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 )
@@ -88,7 +88,7 @@ func NewDiscovery(registry *Registry) *Discovery {
 func (d *Discovery) Pick(name string) (ServiceInstance, error) {
 	items := d.registry.Lookup(name)
 	if len(items) == 0 {
-		return ServiceInstance{}, errors.New("service not found")
+		return ServiceInstance{}, fmt.Errorf("service %q not found", name)
 	}
 	d.mu.Lock()
 	idx := d.offset[name] % len(items)
@@ -101,7 +101,7 @@ func (d *Discovery) Pick(name string) (ServiceInstance, error) {
 func (d *Discovery) PickByCapability(capability string) (ServiceInstance, error) {
 	items := d.registry.LookupByCapability(capability)
 	if len(items) == 0 {
-		return ServiceInstance{}, errors.New("capability not found")
+		return ServiceInstance{}, fmt.Errorf("capability %q not found", capability)
 	}
 	d.mu.Lock()
 	idx := d.offset[capability] % len(items)

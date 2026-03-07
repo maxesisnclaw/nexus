@@ -102,8 +102,8 @@ func TestRunStartFailure(t *testing.T) {
 	loadConfig = func(string) (*config.Config, error) {
 		return cfg, nil
 	}
-	newDaemon = func(*config.Config, *slog.Logger) daemonRunner {
-		return stub
+	newDaemon = func(*config.Config, *slog.Logger) (daemonRunner, error) {
+		return stub, nil
 	}
 	notifyContext = func(context.Context, ...os.Signal) (context.Context, context.CancelFunc) {
 		return context.WithCancel(context.Background())
@@ -142,8 +142,8 @@ func TestRunStartAndStopLifecycle(t *testing.T) {
 	loadConfig = func(string) (*config.Config, error) {
 		return cfg, nil
 	}
-	newDaemon = func(*config.Config, *slog.Logger) daemonRunner {
-		return stub
+	newDaemon = func(*config.Config, *slog.Logger) (daemonRunner, error) {
+		return stub, nil
 	}
 	notifyContext = func(parent context.Context, _ ...os.Signal) (context.Context, context.CancelFunc) {
 		ctx, c := context.WithCancel(parent)
@@ -185,8 +185,8 @@ func TestRunStopCanceledAllowed(t *testing.T) {
 	loadConfig = func(string) (*config.Config, error) {
 		return cfg, nil
 	}
-	newDaemon = func(*config.Config, *slog.Logger) daemonRunner {
-		return stub
+	newDaemon = func(*config.Config, *slog.Logger) (daemonRunner, error) {
+		return stub, nil
 	}
 	notifyContext = func(parent context.Context, _ ...os.Signal) (context.Context, context.CancelFunc) {
 		ctx, c := context.WithCancel(parent)
@@ -222,8 +222,8 @@ func TestRunStopFailure(t *testing.T) {
 	loadConfig = func(string) (*config.Config, error) {
 		return cfg, nil
 	}
-	newDaemon = func(*config.Config, *slog.Logger) daemonRunner {
-		return stub
+	newDaemon = func(*config.Config, *slog.Logger) (daemonRunner, error) {
+		return stub, nil
 	}
 	notifyContext = func(parent context.Context, _ ...os.Signal) (context.Context, context.CancelFunc) {
 		ctx, c := context.WithCancel(parent)

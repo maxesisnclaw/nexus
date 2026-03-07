@@ -31,7 +31,10 @@ func TestIntegrationDaemonLifecycle(t *testing.T) {
 		}},
 	}
 
-	d := New(cfg, logger)
+	d, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

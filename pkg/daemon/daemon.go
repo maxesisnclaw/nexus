@@ -26,10 +26,16 @@ type Daemon struct {
 }
 
 // New creates a daemon instance.
-func New(cfg *config.Config, logger *slog.Logger) *Daemon {
+func New(cfg *config.Config, logger *slog.Logger) (*Daemon, error) {
+	if cfg == nil {
+		return nil, errors.New("daemon: config must not be nil")
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 	pm := NewProcessManager(logger, cfg.Daemon.ShutdownGrace.Duration)
 	health := NewHealthMonitor(logger, pm, cfg.Daemon.HealthInterval.Duration, 5)
-	return &Daemon{cfg: cfg, logger: logger, pm: pm, health: health}
+	return &Daemon{cfg: cfg, logger: logger, pm: pm, health: health}, nil
 }
 
 // Start launches services and starts the health loop.

@@ -21,7 +21,7 @@ type daemonRunner interface {
 
 var (
 	loadConfig    = config.Load
-	newDaemon     = func(cfg *config.Config, logger *slog.Logger) daemonRunner { return daemon.New(cfg, logger) }
+	newDaemon     = func(cfg *config.Config, logger *slog.Logger) (daemonRunner, error) { return daemon.New(cfg, logger) }
 	notifyContext = signal.NotifyContext
 )
 
@@ -46,7 +46,11 @@ func run(args []string) int {
 	}
 
 	logger := newLogger(cfg.Daemon.LogLevel)
-	d := newDaemon(cfg, logger)
+	d, err := newDaemon(cfg, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create daemon failed: %v\n", err)
+		return 1
+	}
 
 	ctx, stop := notifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

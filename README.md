@@ -61,7 +61,7 @@ docker run --rm --privileged -v $(pwd):/workspace -w /workspace nexus-test go te
 ### From Source
 
 ```bash
-git clone https://github.com/example/nexus.git
+git clone https://github.com/maxesisnclaw/nexus.git
 cd nexus
 CGO_ENABLED=0 go build ./...
 ```
