@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"time"
 )
+
+const insecureTCPListenEnv = "NEXUS_ALLOW_INSECURE_TCP_LISTEN"
 
 // TCPTransport implements TCP transport.
 type TCPTransport struct{}
@@ -33,11 +36,22 @@ func (t *TCPTransport) Listen(_ context.Context, addr string) (Listener, error) 
 	if err != nil {
 		return nil, fmt.Errorf("resolve tcp address %s: %w", addr, err)
 	}
+	if !allowsInsecureTCPListen() && !isLoopbackListenAddr(tcpAddr) {
+		return nil, fmt.Errorf("refusing non-loopback tcp listen address %s without %s=1", addr, insecureTCPListenEnv)
+	}
 	ln, err := net.ListenTCP("tcp", tcpAddr)
 	if err != nil {
 		return nil, fmt.Errorf("tcp listen %s: %w", addr, err)
 	}
 	return &tcpListener{ln: ln}, nil
+}
+
+func allowsInsecureTCPListen() bool {
+	return os.Getenv(insecureTCPListenEnv) == "1"
+}
+
+func isLoopbackListenAddr(addr *net.TCPAddr) bool {
+	return addr != nil && addr.IP != nil && addr.IP.IsLoopback()
 }
 
 type tcpListener struct {

@@ -82,7 +82,7 @@ socket = "/run/nexus/registry.sock"
 log_level = "info"
 health_interval = "5s"
 shutdown_grace = "10s"
-listen = "0.0.0.0:7700"
+listen = "127.0.0.1:7700"
 
 [[daemon.peers]]
 addr = "192.168.1.100:7700"
@@ -110,6 +110,8 @@ network = "uds"
 
 `depends_on` and `health_check` are reserved configuration fields for future dependency/liveness orchestration and are not enforced by the current daemon.
 
+TCP transport currently does not provide built-in authentication or TLS. For this reason, TCP listeners are loopback-only by default. Set `NEXUS_ALLOW_INSECURE_TCP_LISTEN=1` only when you intentionally expose Nexus on a trusted network boundary.
+
 ## SDK Examples
 
 ### Go SDK
@@ -124,7 +126,7 @@ client.Handle("echo", func(req *sdk.Request) (*sdk.Response, error) {
 
 ### Python SDK
 
-Python SDK support is planned but not available yet.
+A minimal/experimental Python SDK is available at `pkg/sdk/python/nexus_sdk.py` (UDS/TCP msgpack client/server helpers plus FD passing helpers).
 
 See runnable programs in [`examples/`](examples/README.md).
 

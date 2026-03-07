@@ -42,8 +42,8 @@ func (t *UDSTransport) Listen(_ context.Context, addr string) (Listener, error) 
 	if err := os.MkdirAll(filepath.Dir(addr), 0o755); err != nil {
 		return nil, fmt.Errorf("create uds dir: %w", err)
 	}
-	if err := os.Remove(addr); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("cleanup stale socket: %w", err)
+	if err := cleanupSocketPath(addr); err != nil {
+		return nil, err
 	}
 	unixAddr, err := net.ResolveUnixAddr("unix", addr)
 	if err != nil {
@@ -112,4 +112,21 @@ func (c *udsConn) SendFd(fd int, metadata []byte) error {
 
 func (c *udsConn) RecvFd() (int, []byte, error) {
 	return recvFD(c.unixConn)
+}
+
+func cleanupSocketPath(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat existing socket path: %w", err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("uds path exists and is not a socket: %s", path)
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("cleanup stale socket: %w", err)
+	}
+	return nil
 }

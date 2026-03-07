@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -176,6 +177,67 @@ func TestTransportAddressValidation(t *testing.T) {
 	if _, err := tcp.Listen(context.Background(), "not-an-address"); err == nil {
 		t.Fatal("expected invalid tcp listen address error")
 	}
+}
+
+func TestTCPTransportRejectsNonLoopbackByDefault(t *testing.T) {
+	t.Setenv(insecureTCPListenEnv, "")
+	tcp := NewTCPTransport()
+	if _, err := tcp.Listen(context.Background(), "0.0.0.0:0"); err == nil {
+		t.Fatal("expected non-loopback tcp listen error")
+	}
+}
+
+func TestTCPTransportAllowsNonLoopbackWithOptIn(t *testing.T) {
+	t.Setenv(insecureTCPListenEnv, "1")
+	tcp := NewTCPTransport()
+	ln, err := tcp.Listen(context.Background(), "0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	_ = ln.Close()
+}
+
+func TestUDSListenRejectsExistingNonSocket(t *testing.T) {
+	uds := NewUDSTransport()
+	path := filepath.Join(t.TempDir(), "not-a-socket.sock")
+	if err := os.WriteFile(path, []byte("not a socket"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if _, err := uds.Listen(context.Background(), path); err == nil {
+		t.Fatal("expected error for existing non-socket path")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if info.Mode()&os.ModeSocket != 0 {
+		t.Fatalf("expected regular file to remain, got mode=%v", info.Mode())
+	}
+}
+
+func TestUDSListenRemovesStaleSocket(t *testing.T) {
+	uds := NewUDSTransport()
+	path := testSocketPath(t, "stale")
+
+	addr, err := net.ResolveUnixAddr("unix", path)
+	if err != nil {
+		t.Fatalf("ResolveUnixAddr() error = %v", err)
+	}
+	rawLn, err := net.ListenUnix("unix", addr)
+	if err != nil {
+		t.Fatalf("ListenUnix() error = %v", err)
+	}
+	if err := rawLn.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	ln, err := uds.Listen(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	_ = ln.Close()
 }
 
 func TestListenerAcceptContextCancelled(t *testing.T) {

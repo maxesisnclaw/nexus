@@ -46,7 +46,7 @@ nexus/
 │   └── nexusd/          # 守护进程入口
 │       └── main.go
 ├── pkg/
-│   ├── config/          # 配置解析（TOML/YAML）
+│   ├── config/          # 配置解析（TOML）
 │   │   ├── config.go
 │   │   └── types.go
 │   ├── daemon/          # 进程管理 & 生命周期
@@ -167,7 +167,7 @@ type Message struct {
 ### 注册流程
 
 1. 组件启动后连接 nexusd 的 UDS
-2. 发送注册请求：`{ name, id, endpoints: [{type: "uds", addr: "/run/nexus/svc/xxx.sock"}, {type: "tcp", addr: "0.0.0.0:9005"}], capabilities: [...] }`
+2. 发送注册请求：`{ name, id, endpoints: [{type: "uds", addr: "/run/nexus/svc/xxx.sock"}, {type: "tcp", addr: "127.0.0.1:9005"}], capabilities: [...] }`
 3. nexusd 记录并广播变更给所有已注册组件
 4. 组件定期心跳保活
 
@@ -257,6 +257,8 @@ addr = "192.168.1.100:7700"  # 主节点
 3. 两个 nexusd 互相同步注册信息
 4. 调用远端 worker 时，传输层自动走 TCP
 
+说明：当前 TCP 传输未内置认证和 TLS。为降低默认暴露风险，非 loopback TCP 监听需要显式设置环境变量 `NEXUS_ALLOW_INSECURE_TCP_LISTEN=1`，并应仅用于可信网络边界内。
+
 ## 目标内核兼容性
 
 - 最低 Linux 4.19
@@ -297,7 +299,7 @@ CGO_ENABLED=0 go build -o nexusd ./cmd/nexusd/
 ### Phase 4：高级特性
 - [x] memfd 零拷贝
 - [x] Go SDK
-- [ ] Python SDK
+- [x] Python SDK（minimal/experimental）
 - [ ] Docker 容器组件支持
 
 ### Phase 5：CLI & 运维
