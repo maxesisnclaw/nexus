@@ -376,13 +376,13 @@ func TestUDSTransportErrorBranches(t *testing.T) {
 	}
 }
 
-func TestRouterFallbackToUDSAddress(t *testing.T) {
+func TestRouterRefusesRemoteUDSFallback(t *testing.T) {
 	uds := &fakeTransport{}
 	r := NewRouter(uds, nil)
-	if _, err := r.Dial(context.Background(), ServiceEndpoint{Name: "svc", UDSAddr: "/tmp/s.sock"}); err != nil {
-		t.Fatalf("Dial() error = %v", err)
+	if _, err := r.Dial(context.Background(), ServiceEndpoint{Name: "svc", UDSAddr: "/tmp/s.sock"}); err == nil {
+		t.Fatal("expected error for non-local endpoint without TCP address")
 	}
-	if uds.dials != 1 {
-		t.Fatalf("expected uds dial count=1, got %d", uds.dials)
+	if uds.dials != 0 {
+		t.Fatalf("expected uds dial count=0, got %d", uds.dials)
 	}
 }

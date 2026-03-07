@@ -45,7 +45,16 @@ func (w *watcher) enqueue(event ChangeEvent) {
 	select {
 	case w.events <- event:
 	default:
+		// Drop one stale event to guarantee overflow visibility to consumers.
+		select {
+		case <-w.events:
+		default:
+		}
 		w.dropped.Add(1)
+		select {
+		case w.events <- ChangeEvent{Type: ChangeOverflow}:
+		default:
+		}
 	}
 }
 
@@ -135,6 +144,6 @@ func (r *Registry) notify(name string, event ChangeEvent) {
 	}
 	r.mu.RUnlock()
 	for _, w := range watchers {
-		w.enqueue(event)
+		w.enqueue(ChangeEvent{Type: event.Type, Instance: deepCopyInstance(event.Instance)})
 	}
 }

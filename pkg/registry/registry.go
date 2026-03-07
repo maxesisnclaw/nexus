@@ -85,12 +85,13 @@ func (r *Registry) Register(inst ServiceInstance) {
 		inst.Node = r.nodeID
 	}
 	inst.UpdatedAt = time.Now().UTC()
+	stored := deepCopyInstance(inst)
 
 	r.mu.Lock()
-	r.services[inst.ID] = inst
+	r.services[stored.ID] = stored
 	r.mu.Unlock()
 
-	r.notify(inst.Name, ChangeEvent{Type: ChangeUp, Instance: inst})
+	r.notify(stored.Name, ChangeEvent{Type: ChangeUp, Instance: stored})
 }
 
 // Unregister removes an instance.
@@ -126,7 +127,7 @@ func (r *Registry) Lookup(name string) []ServiceInstance {
 	out := make([]ServiceInstance, 0)
 	for _, inst := range r.services {
 		if inst.Name == name {
-			out = append(out, inst)
+			out = append(out, deepCopyInstance(inst))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -141,7 +142,7 @@ func (r *Registry) LookupByCapability(capability string) []ServiceInstance {
 	for _, inst := range r.services {
 		for _, cap := range inst.Capabilities {
 			if cap == capability {
-				out = append(out, inst)
+				out = append(out, deepCopyInstance(inst))
 				break
 			}
 		}
@@ -156,7 +157,7 @@ func (r *Registry) Snapshot() []ServiceInstance {
 	defer r.mu.RUnlock()
 	out := make([]ServiceInstance, 0, len(r.services))
 	for _, inst := range r.services {
-		out = append(out, inst)
+		out = append(out, deepCopyInstance(inst))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
@@ -167,16 +168,34 @@ func (r *Registry) MergeSnapshot(instances []ServiceInstance) {
 	changes := make([]ChangeEvent, 0)
 	r.mu.Lock()
 	for _, incoming := range instances {
-		current, ok := r.services[incoming.ID]
-		if !ok || incoming.UpdatedAt.After(current.UpdatedAt) {
-			r.services[incoming.ID] = incoming
-			changes = append(changes, ChangeEvent{Type: ChangeUp, Instance: incoming})
+		incomingCopy := deepCopyInstance(incoming)
+		current, ok := r.services[incomingCopy.ID]
+		if !ok || incomingCopy.UpdatedAt.After(current.UpdatedAt) {
+			r.services[incomingCopy.ID] = incomingCopy
+			changes = append(changes, ChangeEvent{Type: ChangeUp, Instance: incomingCopy})
 		}
 	}
 	r.mu.Unlock()
 	for _, ch := range changes {
 		r.notify(ch.Instance.Name, ch)
 	}
+}
+
+func deepCopyInstance(inst ServiceInstance) ServiceInstance {
+	cloned := inst
+	if inst.Capabilities != nil {
+		cloned.Capabilities = append([]string(nil), inst.Capabilities...)
+	}
+	if inst.Endpoints != nil {
+		cloned.Endpoints = append([]Endpoint(nil), inst.Endpoints...)
+	}
+	if inst.Metadata != nil {
+		cloned.Metadata = make(map[string]string, len(inst.Metadata))
+		for k, v := range inst.Metadata {
+			cloned.Metadata[k] = v
+		}
+	}
+	return cloned
 }
 
 func (r *Registry) reapLoop(defaultTTL time.Duration) {

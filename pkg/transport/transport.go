@@ -82,6 +82,9 @@ func (r *Router) Dial(ctx context.Context, target ServiceEndpoint) (Conn, error)
 		}
 		return r.tcp.Dial(ctx, target)
 	}
+	if !target.Local {
+		return nil, fmt.Errorf("remote endpoint %s has no TCP address; refusing UDS dial for non-local target", target.Name)
+	}
 	if target.UDSAddr != "" {
 		if r.uds == nil {
 			return nil, errors.New("uds transport is not configured")

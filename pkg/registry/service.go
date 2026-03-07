@@ -48,6 +48,8 @@ const (
 	ChangeUp ChangeType = "up"
 	// ChangeDown signals an instance removal/expiry event.
 	ChangeDown ChangeType = "down"
+	// ChangeOverflow signals a watcher queue overflow where events were lost.
+	ChangeOverflow ChangeType = "overflow"
 )
 
 // ChangeEvent describes a service change notification.
