@@ -122,3 +122,25 @@ def test_node_tcp_listener_enforces_loopback(registry_socket_path: str) -> None:
 
     with pytest.raises(ValueError, match="Refusing non-loopback TCP listen address"):
         node._start_tcp_listener("0.0.0.0:0")
+
+
+def test_call_missing_service_cleans_round_robin_offset(registry_socket_path: str) -> None:
+    class _MissingRegistry:
+        def lookup(self, _: str) -> list[dict[str, object]]:
+            return []
+
+        def unregister(self, _: str) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    node = Node(name="caller", id="caller-missing", registry_addr=registry_socket_path)
+    node._registry = _MissingRegistry()  # type: ignore[assignment]
+    node._rr_offsets["missing"] = 3
+    try:
+        with pytest.raises(RuntimeError, match="service 'missing' not found"):
+            node.call("missing", "noop", b"")
+        assert "missing" not in node._rr_offsets
+    finally:
+        node.close()

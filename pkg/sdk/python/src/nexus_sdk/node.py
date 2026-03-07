@@ -6,6 +6,7 @@ import logging
 import os
 import socket
 import stat
+import struct
 import threading
 import time
 from dataclasses import dataclass
@@ -19,7 +20,7 @@ DEFAULT_REGISTRY_ADDR = "/run/nexus/registry.sock"
 _HEARTBEAT_INTERVAL_SECONDS = 5.0
 _TCP_IDLE_TIMEOUT_SECONDS = 300.0
 _TCP_LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost", "")
-_LOGGER = logging.getLogger(__name__)
+logger = logging.getLogger("nexus_sdk")
 
 
 @dataclass
@@ -129,13 +130,15 @@ class Node:
 
         instances = self._registry.lookup(service)
         if not instances:
+            with self._rr_lock:
+                self._rr_offsets.pop(service, None)
             raise RuntimeError(f"service {service!r} not found")
 
         instance = self._pick_instance(service, instances)
         addr, use_tcp = self._pick_endpoint(instance)
         if use_tcp and not self._is_loopback_tcp_addr(addr):
             # TODO: implement Noise Protocol encryption for TCP (parity with Go SDK)
-            _LOGGER.warning(
+            logger.warning(
                 "connecting to non-loopback TCP address %s without transport encryption",
                 addr,
             )
@@ -145,12 +148,25 @@ class Node:
         try:
             send_message(conn, {"method": method, "payload": payload, "headers": {}})
             resp = recv_message(conn)
-        except Exception:
+        except (OSError, EOFError, struct.error):
             reusable = False
             try:
                 conn.close()
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.debug("failed to close failed RPC connection %s: %s", addr, exc)
+            raise
+        except Exception as exc:
+            reusable = False
+            logger.warning(
+                "unexpected RPC call failure service=%s method=%s: %s",
+                service,
+                method,
+                exc,
+            )
+            try:
+                conn.close()
+            except OSError as close_exc:
+                logger.debug("failed to close failed RPC connection %s: %s", addr, close_exc)
             raise
         finally:
             if reusable:
@@ -179,16 +195,16 @@ class Node:
         for listener in self._listeners:
             try:
                 listener.close()
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.debug("failed to close listener: %s", exc)
 
         with self._conn_lock:
             active_conns = list(self._active_conns)
         for conn in active_conns:
             try:
                 conn.close()
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.debug("failed to close active connection: %s", exc)
 
         for thread in list(self._accept_threads):
             if thread.is_alive() and thread is not threading.current_thread():
@@ -203,8 +219,10 @@ class Node:
         if self._registered:
             try:
                 self._registry.unregister(self._id)
-            except Exception:
-                pass
+            except OSError as exc:
+                logger.debug("unregister failed for %s due to socket error: %s", self._id, exc)
+            except Exception as exc:
+                logger.warning("unregister failed for %s: %s", self._id, exc)
             self._registered = False
 
         if self._heartbeat_thread and self._heartbeat_thread.is_alive() and self._heartbeat_thread is not threading.current_thread():
@@ -273,8 +291,8 @@ class Node:
             for listener in listeners:
                 try:
                     listener.close()
-                except OSError:
-                    pass
+                except OSError as exc:
+                    logger.debug("failed to close listener during startup rollback: %s", exc)
             with self._state_lock:
                 if self._state != "closed":
                     self._state = "new"
@@ -299,8 +317,8 @@ class Node:
             if not acquired:
                 try:
                     conn.close()
-                except OSError:
-                    pass
+                except OSError as exc:
+                    logger.debug("failed to close unacquired connection: %s", exc)
                 continue
 
             try:
@@ -309,8 +327,8 @@ class Node:
                 self._conn_sem.release()
                 try:
                     conn.close()
-                except OSError:
-                    pass
+                except OSError as exc:
+                    logger.debug("failed to close connection after timeout setup failure: %s", exc)
                 continue
 
             conn_thread = threading.Thread(target=self._serve_conn, args=(conn,), daemon=True)
@@ -328,7 +346,11 @@ class Node:
                         req = recv_message(conn)
                     except socket.timeout:
                         return
-                    except (EOFError, OSError, ValueError):
+                    except (EOFError, OSError, struct.error) as exc:
+                        logger.debug("connection receive terminated: %s", exc)
+                        return
+                    except Exception as exc:
+                        logger.warning("unexpected receive error: %s", exc)
                         return
 
                     method = str(req.get("method") or "")
@@ -356,7 +378,12 @@ class Node:
 
                     try:
                         resp = handler(Request(method=method, payload=bytes(payload), headers=headers))
+                    except (ValueError, RuntimeError) as exc:
+                        logger.debug("handler returned expected error for method %s: %s", method, exc)
+                        send_message(conn, {"method": method, "payload": b"", "headers": {"error": str(exc)}})
+                        continue
                     except Exception as exc:
+                        logger.warning("unexpected handler exception for method %s: %s", method, exc)
                         send_message(conn, {"method": method, "payload": b"", "headers": {"error": str(exc)}})
                         continue
 
@@ -380,7 +407,11 @@ class Node:
         while not self._stop.wait(_HEARTBEAT_INTERVAL_SECONDS):
             try:
                 self._registry.heartbeat(self._id)
-            except Exception:
+            except (OSError, EOFError) as exc:
+                logger.warning("heartbeat failed for %s: %s", self._id, exc)
+                continue
+            except Exception as exc:
+                logger.warning("unexpected heartbeat failure for %s: %s", self._id, exc)
                 continue
 
     def _pick_instance(self, service: str, instances: list[dict[str, object]]) -> dict[str, object]:

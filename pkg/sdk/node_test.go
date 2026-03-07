@@ -111,6 +111,27 @@ func TestNewValidationAndDefaults(t *testing.T) {
 	}
 }
 
+func TestRoundRobinDiscoveryPickCleansOffsetOnMissingService(t *testing.T) {
+	reg := registry.New("node-a")
+	defer reg.Close()
+
+	discovery := newRoundRobinDiscovery(&localRegistryBackend{reg: reg})
+	discovery.mu.Lock()
+	discovery.offset["missing"] = 7
+	discovery.mu.Unlock()
+
+	if _, err := discovery.Pick("missing"); err == nil {
+		t.Fatal("expected Pick() to fail for missing service")
+	}
+
+	discovery.mu.Lock()
+	_, ok := discovery.offset["missing"]
+	discovery.mu.Unlock()
+	if ok {
+		t.Fatal("expected stale offset entry to be removed after missing lookup")
+	}
+}
+
 func TestCallRetrySucceedsAfterDialFailures(t *testing.T) {
 	reg := registry.New("node-a")
 	defer reg.Close()

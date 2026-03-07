@@ -94,6 +94,9 @@ func newRoundRobinDiscovery(reg registryBackend) *roundRobinDiscovery {
 func (d *roundRobinDiscovery) Pick(name string) (registry.ServiceInstance, error) {
 	items := d.registry.Lookup(name)
 	if len(items) == 0 {
+		d.mu.Lock()
+		delete(d.offset, name)
+		d.mu.Unlock()
 		return registry.ServiceInstance{}, fmt.Errorf("service %q not found", name)
 	}
 	d.mu.Lock()

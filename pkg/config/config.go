@@ -79,10 +79,15 @@ func validate(cfg *Config) error {
 	if cfg.Daemon.HealthInterval.Duration <= 0 {
 		return errors.New("daemon.health_interval must be > 0")
 	}
+	seen := make(map[string]struct{}, len(cfg.Services))
 	for _, svc := range cfg.Services {
 		if svc.Name == "" {
 			return errors.New("service.name is required")
 		}
+		if _, ok := seen[svc.Name]; ok {
+			return fmt.Errorf("duplicate service name %q", svc.Name)
+		}
+		seen[svc.Name] = struct{}{}
 		switch svc.Type {
 		case "singleton":
 			if len(svc.Instances) > 0 {

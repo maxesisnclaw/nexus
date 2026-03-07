@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -254,5 +255,26 @@ instances = [{ id = "legacy-1" }]
 `)
 	if _, err := Parse(data); err == nil {
 		t.Fatal("expected invalid docker ports validation error")
+	}
+}
+
+func TestParseRejectsDuplicateServiceNames(t *testing.T) {
+	data := []byte(`
+[[service]]
+name = "dup"
+runtime = "binary"
+binary = "/bin/echo"
+
+[[service]]
+name = "dup"
+runtime = "binary"
+binary = "/bin/echo"
+`)
+	_, err := Parse(data)
+	if err == nil {
+		t.Fatal("expected duplicate service name validation error")
+	}
+	if !strings.Contains(err.Error(), `duplicate service name "dup"`) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
