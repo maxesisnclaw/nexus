@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
 
 var execCommandContext = exec.CommandContext
+var dockerContainerNameSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_.-]`)
 
 type dockerRuntime interface {
 	Start(ctx context.Context, proc *ManagedProcess) (string, error)
@@ -82,7 +84,6 @@ func (d *dockerCLI) IsRunning(container string) (bool, error) {
 }
 
 func dockerContainerName(proc *ManagedProcess) string {
-	cleanID := strings.ReplaceAll(proc.ID, "/", "-")
-	cleanID = strings.ReplaceAll(cleanID, "_", "-")
+	cleanID := dockerContainerNameSanitizer.ReplaceAllString(proc.ID, "-")
 	return "nexus-" + cleanID
 }

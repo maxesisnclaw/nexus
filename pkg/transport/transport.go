@@ -14,16 +14,23 @@ var (
 
 // Message is the shared request/response envelope.
 type Message struct {
-	Method  string            `msgpack:"method"`
-	Payload []byte            `msgpack:"payload"`
+	// Method is the RPC method name.
+	Method string `msgpack:"method"`
+	// Payload is the raw request or response body.
+	Payload []byte `msgpack:"payload"`
+	// Headers carries optional metadata for the message.
 	Headers map[string]string `msgpack:"headers,omitempty"`
 }
 
 // ServiceEndpoint describes where and how a service can be reached.
 type ServiceEndpoint struct {
-	Name    string
-	Local   bool
+	// Name is the target service name.
+	Name string
+	// Local indicates whether the target runs on the same machine.
+	Local bool
+	// UDSAddr is the Unix domain socket address.
 	UDSAddr string
+	// TCPAddr is the TCP address.
 	TCPAddr string
 }
 

@@ -17,8 +17,18 @@ import (
 
 func TestDockerContainerName(t *testing.T) {
 	name := dockerContainerName(&ManagedProcess{ID: "svc/a_b"})
-	if name != "nexus-svc-a-b" {
+	if name != "nexus-svc-a_b" {
 		t.Fatalf("unexpected docker container name: %s", name)
+	}
+}
+
+func TestDockerContainerNameSanitization(t *testing.T) {
+	name := dockerContainerName(&ManagedProcess{ID: "svc/a b:c@d#e"})
+	if name != "nexus-svc-a-b-c-d-e" {
+		t.Fatalf("unexpected sanitized docker container name: %s", name)
+	}
+	if strings.HasPrefix(name, "-") || strings.HasPrefix(name, ".") {
+		t.Fatalf("container name should not start with invalid character: %s", name)
 	}
 }
 

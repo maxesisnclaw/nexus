@@ -14,20 +14,30 @@ const (
 
 // Endpoint describes a single reachable service address.
 type Endpoint struct {
+	// Type is the endpoint protocol.
 	Type EndpointType `msgpack:"type"`
-	Addr string       `msgpack:"addr"`
+	// Addr is the endpoint address string.
+	Addr string `msgpack:"addr"`
 }
 
 // ServiceInstance is a registered service instance.
 type ServiceInstance struct {
-	Name         string            `msgpack:"name"`
-	ID           string            `msgpack:"id"`
-	Node         string            `msgpack:"node,omitempty"`
-	Capabilities []string          `msgpack:"capabilities,omitempty"`
-	Endpoints    []Endpoint        `msgpack:"endpoints"`
-	Metadata     map[string]string `msgpack:"metadata,omitempty"`
-	TTL          time.Duration     `msgpack:"ttl"`
-	UpdatedAt    time.Time         `msgpack:"updated_at"`
+	// Name is the logical service name.
+	Name string `msgpack:"name"`
+	// ID is the unique instance identifier.
+	ID string `msgpack:"id"`
+	// Node is the source daemon node id.
+	Node string `msgpack:"node,omitempty"`
+	// Capabilities lists advertised capability tags.
+	Capabilities []string `msgpack:"capabilities,omitempty"`
+	// Endpoints lists reachable network endpoints for this instance.
+	Endpoints []Endpoint `msgpack:"endpoints"`
+	// Metadata carries optional user-defined key/value data.
+	Metadata map[string]string `msgpack:"metadata,omitempty"`
+	// TTL defines heartbeat expiry duration.
+	TTL time.Duration `msgpack:"ttl"`
+	// UpdatedAt is the last heartbeat or registration timestamp in UTC.
+	UpdatedAt time.Time `msgpack:"updated_at"`
 }
 
 // ChangeType is the service lifecycle event kind.
@@ -42,6 +52,8 @@ const (
 
 // ChangeEvent describes a service change notification.
 type ChangeEvent struct {
-	Type     ChangeType
+	// Type is the lifecycle change type.
+	Type ChangeType
+	// Instance is the affected service instance snapshot.
 	Instance ServiceInstance
 }

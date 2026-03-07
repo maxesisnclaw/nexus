@@ -1,7 +1,5 @@
 # Nexus
 
-<!-- TODO: update badge URLs when the public repository is available -->
-
 Nexus is a lightweight microservice foundation focused on local-process orchestration, service registry/discovery, and high-performance IPC.
 
 - Language: Go

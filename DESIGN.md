@@ -276,27 +276,27 @@ CGO_ENABLED=0 go build -o nexusd ./cmd/nexusd/
 ## 开发阶段规划
 
 ### Phase 1：核心骨架
-- [ ] nexusd 守护进程启动/信号处理
-- [ ] 配置解析（TOML）
-- [ ] 进程管理（启动/停止/重启）
-- [ ] 健康检查（进程存活检测）
+- [x] nexusd 守护进程启动/信号处理
+- [x] 配置解析（TOML）
+- [x] 进程管理（启动/停止/重启）
+- [x] 健康检查（进程存活检测）
 - [ ] `depends_on` / `health_check` 配置生效（规划中，当前未实现）
 
 ### Phase 2：传输层
-- [ ] UDS transport + msgpack
-- [ ] TCP transport + msgpack
-- [ ] 统一 Transport 接口
-- [ ] 自动路由（同机 UDS / 跨机 TCP）
+- [x] UDS transport + msgpack
+- [x] TCP transport + msgpack
+- [x] 统一 Transport 接口
+- [x] 自动路由（同机 UDS / 跨机 TCP）
 
 ### Phase 3：服务注册中心
-- [ ] 注册/注销/心跳
-- [ ] 服务发现（按名称/按能力）
-- [ ] 变更通知
+- [x] 注册/注销/心跳
+- [x] 服务发现（按名称/按能力）
+- [x] 变更通知
 - [ ] 多节点注册信息同步
 
 ### Phase 4：高级特性
-- [ ] memfd 零拷贝
-- [ ] Go SDK
+- [x] memfd 零拷贝
+- [x] Go SDK
 - [ ] Python SDK
 - [ ] Docker 容器组件支持
 

@@ -25,32 +25,51 @@ var createMemfd = transport.CreateMemfd
 
 // Config controls SDK client behavior.
 type Config struct {
-	Name                  string
-	ID                    string
-	Capabilities          []string
-	UDSAddr               string
-	TCPAddr               string
-	Network               string
-	RequestTimeout        time.Duration
-	ServeTimeout          time.Duration
+	// Name is the service name to register.
+	Name string
+	// ID is the unique instance id; defaults to Name.
+	ID string
+	// Capabilities lists discovery capability tags.
+	Capabilities []string
+	// UDSAddr is the service UDS listen address.
+	UDSAddr string
+	// TCPAddr is the service TCP listen address.
+	TCPAddr string
+	// Network controls exposure mode such as uds, tcp, or dual.
+	Network string
+	// RequestTimeout bounds a single outbound call.
+	RequestTimeout time.Duration
+	// ServeTimeout bounds server-side request handling per connection cycle.
+	ServeTimeout time.Duration
+	// LargePayloadThreshold enables fd path for payloads at or above this size.
 	LargePayloadThreshold int
-	CallRetries           int
-	RetryBackoff          time.Duration
-	Registry              *registry.Registry
-	Router                *transport.Router
-	Logger                *slog.Logger
+	// CallRetries is the number of retry attempts for outbound calls.
+	CallRetries int
+	// RetryBackoff is the delay between retries.
+	RetryBackoff time.Duration
+	// Registry is the service registry backend.
+	Registry *registry.Registry
+	// Router is the transport router used for dial/listen.
+	Router *transport.Router
+	// Logger receives SDK logs.
+	Logger *slog.Logger
 }
 
 // Request represents an incoming method invocation.
 type Request struct {
-	Method  string
+	// Method is the invoked method name.
+	Method string
+	// Payload is the request body.
 	Payload []byte
+	// Headers contains optional request metadata.
 	Headers map[string]string
 }
 
 // Response represents handler output.
 type Response struct {
+	// Payload is the response body.
 	Payload []byte
+	// Headers contains optional response metadata.
 	Headers map[string]string
 }
 

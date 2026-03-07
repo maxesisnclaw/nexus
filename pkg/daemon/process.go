@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,22 +17,83 @@ import (
 
 // ProcessState describes a managed process state snapshot.
 type ProcessState struct {
-	ID      string
+	// ID is the unique managed process identifier.
+	ID string
+	// Service is the owning service name.
 	Service string
-	PID     int
+	// PID is the OS process id for binary runtime, or 0 for non-process runtimes.
+	PID int
+	// Running reports whether the managed instance is currently alive.
 	Running bool
 }
 
 // ManagedProcess keeps runtime state for one process instance.
 type ManagedProcess struct {
-	ID      string
+	// ID is the unique managed process identifier.
+	ID string
+	// Service is the owning service name.
 	Service string
-	Spec    config.ServiceSpec
-	Args    []string
+	// Spec is the configured service specification.
+	Spec config.ServiceSpec
+	// Args contains effective runtime args after instance expansion.
+	Args []string
 
 	cmd           *exec.Cmd
 	containerName string
 	exited        chan struct{}
+}
+
+type prefixWriter struct {
+	mu     sync.Mutex
+	logger *slog.Logger
+	id     string
+	stream string
+	buf    []byte
+}
+
+func (w *prefixWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.buf = append(w.buf, p...)
+	w.flushLocked(false)
+	return len(p), nil
+}
+
+func (w *prefixWriter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.flushLocked(true)
+}
+
+func (w *prefixWriter) flushLocked(flushPartial bool) {
+	for {
+		idx := bytes.IndexByte(w.buf, '\n')
+		if idx < 0 {
+			break
+		}
+		line := string(w.buf[:idx])
+		if len(line) > 0 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+		w.logLine(line)
+		w.buf = w.buf[idx+1:]
+	}
+	if flushPartial && len(w.buf) > 0 {
+		line := string(w.buf)
+		if len(line) > 0 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+		w.logLine(line)
+		w.buf = w.buf[:0]
+	}
+}
+
+func (w *prefixWriter) logLine(line string) {
+	if w.stream == "stderr" {
+		w.logger.Warn("process output", "id", w.id, "stream", w.stream, "line", line)
+		return
+	}
+	w.logger.Info("process output", "id", w.id, "stream", w.stream, "line", line)
 }
 
 // ProcessManager starts/stops and tracks service processes.
@@ -272,8 +334,10 @@ func (m *ProcessManager) startProcess(ctx context.Context, proc *ManagedProcess)
 	}
 
 	cmd := exec.CommandContext(ctx, proc.Spec.Binary, proc.Args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	stdoutWriter := &prefixWriter{logger: m.logger, id: proc.ID, stream: "stdout"}
+	stderrWriter := &prefixWriter{logger: m.logger, id: proc.ID, stream: "stderr"}
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
 	if err := cmd.Start(); err != nil {
 		m.deleteProcessIfMatch(proc.ID, reservation)
 		return fmt.Errorf("start process %s: %w", proc.ID, err)
@@ -292,12 +356,16 @@ func (m *ProcessManager) startProcess(ctx context.Context, proc *ManagedProcess)
 		time.Sleep(100 * time.Millisecond)
 		_ = proc.cmd.Process.Signal(syscall.SIGKILL)
 		_ = cmd.Wait()
+		stdoutWriter.Flush()
+		stderrWriter.Flush()
 		return fmt.Errorf("start process %s canceled during startup", proc.ID)
 	}
 
 	m.logger.Info("service process started", "id", proc.ID, "service", proc.Service, "pid", cmd.Process.Pid)
-	go func(p *ManagedProcess, c *exec.Cmd, exited chan struct{}) {
+	go func(p *ManagedProcess, c *exec.Cmd, exited chan struct{}, outw, errw *prefixWriter) {
 		err := c.Wait()
+		outw.Flush()
+		errw.Flush()
 		close(exited)
 		if err != nil {
 			m.logger.Warn("service process exited with error", "id", p.ID, "err", err)
@@ -305,7 +373,7 @@ func (m *ProcessManager) startProcess(ctx context.Context, proc *ManagedProcess)
 			m.logger.Info("service process exited", "id", p.ID)
 		}
 		m.deleteProcessIfMatch(p.ID, p)
-	}(proc, cmd, proc.exited)
+	}(proc, cmd, proc.exited, stdoutWriter, stderrWriter)
 	return nil
 }
 
