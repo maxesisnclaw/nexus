@@ -84,6 +84,7 @@ type Client struct {
 	ownsReg   bool
 	discovery *registry.Discovery
 	router    *transport.Router
+	connPool  connectionPool
 
 	handlers map[string]Handler
 
@@ -141,6 +142,7 @@ func New(cfg Config) (*Client, error) {
 		ownsReg:   ownsReg,
 		discovery: registry.NewDiscovery(cfg.Registry),
 		router:    cfg.Router,
+		connPool:  newConnectionPool(cfg.Router),
 		handlers:  make(map[string]Handler),
 		heartbeat: make(chan struct{}),
 	}, nil
@@ -193,35 +195,46 @@ func (c *Client) callOnce(serviceName, method string, payload []byte, preferFD b
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.RequestTimeout)
 	defer cancel()
-	conn, err := c.router.Dial(ctx, endpoint)
+	conn, err := c.connPool.Acquire(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	reusable := true
+	defer func() {
+		c.connPool.Release(endpoint, conn, reusable)
+	}()
 
 	if !preferFD {
-		return c.callMsgpack(conn, method, payload)
+		resp, connHealthy, err := c.callMsgpack(conn, method, payload)
+		reusable = connHealthy
+		return resp, err
 	}
 
 	fd, err := createMemfd("nexus-call", payload)
 	if err != nil {
-		return c.callMsgpack(conn, method, payload)
+		resp, connHealthy, err := c.callMsgpack(conn, method, payload)
+		reusable = connHealthy
+		return resp, err
 	}
 	defer syscall.Close(fd)
 
 	setup := &transport.Message{Method: fdCallMethod, Headers: map[string]string{"method": method}}
 	if err := conn.Send(setup); err != nil {
+		reusable = false
 		return c.callMsgpackFallback(endpoint, method, payload)
 	}
 	ack, err := conn.Recv()
 	if err != nil || ack.Headers[fdReadyKey] != "1" {
+		reusable = false
 		return c.callMsgpackFallback(endpoint, method, payload)
 	}
 	if err := conn.SendFd(fd, []byte("fd")); err != nil {
+		reusable = false
 		return c.callMsgpackFallback(endpoint, method, payload)
 	}
 	resp, err := conn.Recv()
 	if err != nil {
+		reusable = false
 		return nil, err
 	}
 	if msgErr, ok := resp.Headers["error"]; ok {
@@ -233,26 +246,31 @@ func (c *Client) callOnce(serviceName, method string, payload []byte, preferFD b
 func (c *Client) callMsgpackFallback(endpoint transport.ServiceEndpoint, method string, payload []byte) (*Response, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.RequestTimeout)
 	defer cancel()
-	conn, err := c.router.Dial(ctx, endpoint)
+	conn, err := c.connPool.Acquire(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
-	return c.callMsgpack(conn, method, payload)
+	connHealthy := true
+	defer func() {
+		c.connPool.Release(endpoint, conn, connHealthy)
+	}()
+	resp, healthy, err := c.callMsgpack(conn, method, payload)
+	connHealthy = healthy
+	return resp, err
 }
 
-func (c *Client) callMsgpack(conn transport.Conn, method string, payload []byte) (*Response, error) {
+func (c *Client) callMsgpack(conn transport.Conn, method string, payload []byte) (*Response, bool, error) {
 	if err := conn.Send(&transport.Message{Method: method, Payload: payload}); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	resp, err := conn.Recv()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if msgErr, ok := resp.Headers["error"]; ok {
-		return nil, errors.New(msgErr)
+		return nil, true, errors.New(msgErr)
 	}
-	return &Response{Payload: resp.Payload, Headers: resp.Headers}, nil
+	return &Response{Payload: resp.Payload, Headers: resp.Headers}, true, nil
 }
 
 // Serve starts serving requests from configured endpoint.
@@ -299,6 +317,10 @@ func (c *Client) Close() error {
 		if c.listener != nil {
 			c.closeErr = c.listener.Close()
 			c.listener = nil
+		}
+		poolErr := c.connPool.Close()
+		if c.closeErr != nil || poolErr != nil {
+			c.closeErr = errors.Join(c.closeErr, poolErr)
 		}
 		if c.ownsReg {
 			c.registry.Close()

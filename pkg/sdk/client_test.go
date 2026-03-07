@@ -169,6 +169,96 @@ func TestCallRetryExhausted(t *testing.T) {
 	}
 }
 
+func TestCallReusesConnectionAcrossCalls(t *testing.T) {
+	reg := registry.New("node-a")
+	defer reg.Close()
+
+	const addr = "/tmp/echo-reuse.sock"
+	reg.Register(registry.ServiceInstance{
+		Name:      "echo",
+		ID:        "echo-1",
+		Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: addr}},
+	})
+	rt := &routingTransport{
+		queues: map[string][]transport.Conn{
+			addr: {&echoConn{}},
+		},
+	}
+	client, err := New(Config{
+		Name:     "caller",
+		ID:       "caller-1",
+		Registry: reg,
+		Router:   transport.NewRouter(rt, rt),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer client.Close()
+
+	resp, err := client.Call("echo", "ping", []byte("first"))
+	if err != nil {
+		t.Fatalf("first Call() error = %v", err)
+	}
+	if string(resp.Payload) != "first" {
+		t.Fatalf("unexpected first payload: %q", string(resp.Payload))
+	}
+
+	resp, err = client.Call("echo", "ping", []byte("second"))
+	if err != nil {
+		t.Fatalf("second Call() error = %v", err)
+	}
+	if string(resp.Payload) != "second" {
+		t.Fatalf("unexpected second payload: %q", string(resp.Payload))
+	}
+
+	if got := rt.dialCount(addr); got != 1 {
+		t.Fatalf("expected one dial for reused connection, got %d", got)
+	}
+}
+
+func TestCallDiscardsBadConnectionAndRedials(t *testing.T) {
+	reg := registry.New("node-a")
+	defer reg.Close()
+
+	const addr = "/tmp/echo-redial.sock"
+	reg.Register(registry.ServiceInstance{
+		Name:      "echo",
+		ID:        "echo-1",
+		Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: addr}},
+	})
+	rt := &routingTransport{
+		queues: map[string][]transport.Conn{
+			addr: {
+				&scriptedConn{sendErr: errors.New("forced send failure")},
+				&echoConn{},
+			},
+		},
+	}
+	client, err := New(Config{
+		Name:         "caller",
+		ID:           "caller-1",
+		Registry:     reg,
+		Router:       transport.NewRouter(rt, rt),
+		CallRetries:  1,
+		RetryBackoff: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer client.Close()
+
+	resp, err := client.Call("echo", "ping", []byte("hello"))
+	if err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if string(resp.Payload) != "hello" {
+		t.Fatalf("unexpected payload: %q", string(resp.Payload))
+	}
+	if got := rt.dialCount(addr); got != 2 {
+		t.Fatalf("expected bad connection discard + redial, got %d dials", got)
+	}
+}
+
 func TestCallWithDataFallbackToRegularCall(t *testing.T) {
 	reg := registry.New("node-a")
 	defer reg.Close()
@@ -266,6 +356,9 @@ func TestCallWithDataFallbackDoesNotRepickInstance(t *testing.T) {
 	if !bytes.Equal(resp.Payload, payload) {
 		t.Fatalf("payload mismatch: got=%d want=%d", len(resp.Payload), len(payload))
 	}
+	if got := rt.dialCount("/tmp/echo-1.sock"); got != 2 {
+		t.Fatalf("expected fd attempt plus fallback dial on same instance, got %d", got)
+	}
 	if got := rt.dialCount("/tmp/echo-2.sock"); got != 0 {
 		t.Fatalf("expected no fallback dial on second instance, got %d", got)
 	}
@@ -321,19 +414,19 @@ func TestCallMsgpackErrorBranches(t *testing.T) {
 	}
 	defer client.Close()
 
-	if _, err := client.callMsgpack(&scriptedConn{
+	if _, _, err := client.callMsgpack(&scriptedConn{
 		sendErr: errors.New("send failed"),
 	}, "echo", []byte("x")); err == nil {
 		t.Fatal("expected send error")
 	}
 
-	if _, err := client.callMsgpack(&scriptedConn{
+	if _, _, err := client.callMsgpack(&scriptedConn{
 		recvErr: io.EOF,
 	}, "echo", []byte("x")); err == nil {
 		t.Fatal("expected recv error")
 	}
 
-	if _, err := client.callMsgpack(&scriptedConn{
+	if _, _, err := client.callMsgpack(&scriptedConn{
 		recvMsg: &transport.Message{Headers: map[string]string{"error": "remote error"}},
 	}, "echo", []byte("x")); err == nil {
 		t.Fatal("expected remote error header")
@@ -435,6 +528,48 @@ func TestCloseUsesSyncOnce(t *testing.T) {
 	}
 	if listener.closeCalls != 1 {
 		t.Fatalf("expected listener close once, got %d", listener.closeCalls)
+	}
+}
+
+func TestCloseCleansConnectionPoolResources(t *testing.T) {
+	reg := registry.New("node-a")
+	defer reg.Close()
+
+	const addr = "/tmp/echo-close-pool.sock"
+	reg.Register(registry.ServiceInstance{
+		Name:      "echo",
+		ID:        "echo-1",
+		Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: addr}},
+	})
+
+	tracked := &trackingEchoConn{}
+	rt := &routingTransport{
+		queues: map[string][]transport.Conn{
+			addr: {tracked},
+		},
+	}
+	client, err := New(Config{
+		Name:     "caller",
+		ID:       "caller-1",
+		Registry: reg,
+		Router:   transport.NewRouter(rt, rt),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := client.Call("echo", "ping", []byte("hello")); err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if got := tracked.closeCalls.Load(); got != 0 {
+		t.Fatalf("expected pooled connection to remain open before Close(), got %d close calls", got)
+	}
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if got := tracked.closeCalls.Load(); got != 1 {
+		t.Fatalf("expected Close() to clean pooled connection once, got %d", got)
 	}
 }
 
@@ -713,6 +848,40 @@ func (e *echoConn) Close() error {
 }
 
 func (e *echoConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+
+type trackingEchoConn struct {
+	req        *transport.Message
+	closeCalls atomic.Int32
+}
+
+func (e *trackingEchoConn) Send(msg *transport.Message) error {
+	e.req = msg
+	return nil
+}
+
+func (e *trackingEchoConn) Recv() (*transport.Message, error) {
+	if e.req == nil {
+		return nil, errors.New("request missing")
+	}
+	return &transport.Message{Method: e.req.Method, Payload: e.req.Payload, Headers: map[string]string{}}, nil
+}
+
+func (e *trackingEchoConn) SendFd(int, []byte) error {
+	return transport.ErrFDUnsupported
+}
+
+func (e *trackingEchoConn) RecvFd() (int, []byte, error) {
+	return -1, nil, transport.ErrFDUnsupported
+}
+
+func (e *trackingEchoConn) Close() error {
+	e.closeCalls.Add(1)
+	return nil
+}
+
+func (e *trackingEchoConn) SetReadDeadline(time.Time) error {
 	return nil
 }
 
