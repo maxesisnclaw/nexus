@@ -651,7 +651,7 @@ func TestProcessManagerRestartProcessNilContext(t *testing.T) {
 		t.Fatalf("StartService() error = %v", err)
 	}
 
-	if err := pm.RestartProcess(nil, "legacy"); err != nil {
+	if err := pm.RestartProcess(context.Background(), "legacy"); err != nil {
 		t.Fatalf("RestartProcess() error = %v", err)
 	}
 	if fake.startCalls != 2 {
