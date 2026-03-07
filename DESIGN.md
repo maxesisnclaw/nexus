@@ -182,7 +182,7 @@ type Message struct {
 ```go
 package main
 
-import "nexus/pkg/sdk"
+import "github.com/maxesisn/nexus/pkg/sdk"
 
 func main() {
     // 初始化 SDK，自动连接本机 nexusd

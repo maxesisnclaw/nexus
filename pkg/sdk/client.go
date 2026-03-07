@@ -12,8 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"nexus/pkg/registry"
-	"nexus/pkg/transport"
+	"github.com/maxesisn/nexus/pkg/registry"
+	"github.com/maxesisn/nexus/pkg/transport"
 )
 
 const (

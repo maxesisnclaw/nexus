@@ -1,4 +1,4 @@
-module nexus
+module github.com/maxesisn/nexus
 
 go 1.26.0
 

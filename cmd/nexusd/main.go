@@ -10,8 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"nexus/pkg/config"
-	"nexus/pkg/daemon"
+	"github.com/maxesisn/nexus/pkg/config"
+	"github.com/maxesisn/nexus/pkg/daemon"
 )
 
 func main() {

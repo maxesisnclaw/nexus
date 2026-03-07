@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"nexus/pkg/config"
+	"github.com/maxesisn/nexus/pkg/config"
 )
 
 // Daemon orchestrates managed services.

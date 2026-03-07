@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"nexus/pkg/registry"
-	"nexus/pkg/sdk"
+	"github.com/maxesisn/nexus/pkg/registry"
+	"github.com/maxesisn/nexus/pkg/sdk"
 )
 
 func main() {

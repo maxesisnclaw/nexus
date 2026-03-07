@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"nexus/pkg/config"
+	"github.com/maxesisn/nexus/pkg/config"
 )
 
 func TestIntegrationDaemonLifecycle(t *testing.T) {
