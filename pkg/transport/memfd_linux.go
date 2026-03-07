@@ -36,11 +36,17 @@ func CreateMemfd(name string, payload []byte) (int, error) {
 
 // ReadFDAll reads all bytes from an fd while preserving current offset behavior.
 func ReadFDAll(fd int) ([]byte, error) {
-	if _, err := unix.Seek(fd, 0, 0); err != nil {
+	dupFD, err := unix.Dup(fd)
+	if err != nil {
+		return nil, fmt.Errorf("dup fd: %w", err)
+	}
+	if _, err := unix.Seek(dupFD, 0, 0); err != nil {
+		_ = unix.Close(dupFD)
 		return nil, fmt.Errorf("seek fd: %w", err)
 	}
-	f := os.NewFile(uintptr(fd), "nexus-fd")
+	f := os.NewFile(uintptr(dupFD), "nexus-fd")
 	if f == nil {
+		_ = unix.Close(dupFD)
 		return nil, fmt.Errorf("invalid fd %d", fd)
 	}
 	defer f.Close()

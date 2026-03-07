@@ -5,6 +5,8 @@ package transport
 import (
 	"bytes"
 	"context"
+	"errors"
+	"net"
 	"path/filepath"
 	"testing"
 	"time"
@@ -97,6 +99,116 @@ func TestCreateMemfdAndReadFDAll(t *testing.T) {
 func TestReadFDAllInvalidFD(t *testing.T) {
 	if _, err := ReadFDAll(-1); err == nil {
 		t.Fatal("expected invalid fd error")
+	}
+}
+
+func TestReadFDAllKeepsCallerFDOpen(t *testing.T) {
+	payload := []byte("still-open")
+	fd, err := CreateMemfd("readfdall-open", payload)
+	if err != nil {
+		t.Fatalf("CreateMemfd() error = %v", err)
+	}
+	defer unix.Close(fd)
+
+	if _, err := ReadFDAll(fd); err != nil {
+		t.Fatalf("ReadFDAll() error = %v", err)
+	}
+	if _, err := unix.Seek(fd, 0, 0); err != nil {
+		t.Fatalf("fd should remain open after ReadFDAll(): %v", err)
+	}
+
+	buf := make([]byte, len(payload))
+	n, err := unix.Read(fd, buf)
+	if err != nil {
+		t.Fatalf("read via caller fd failed: %v", err)
+	}
+	if !bytes.Equal(buf[:n], payload) {
+		t.Fatalf("caller fd payload mismatch: got=%q want=%q", string(buf[:n]), string(payload))
+	}
+}
+
+func TestRecvFDClosesExtraFDs(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "multi-fd.sock")
+	addr, err := net.ResolveUnixAddr("unix", sock)
+	if err != nil {
+		t.Fatalf("ResolveUnixAddr() error = %v", err)
+	}
+	ln, err := net.ListenUnix("unix", addr)
+	if err != nil {
+		t.Fatalf("ListenUnix() error = %v", err)
+	}
+	defer ln.Close()
+
+	acceptCh := make(chan *net.UnixConn, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		conn, acceptErr := ln.AcceptUnix()
+		if acceptErr != nil {
+			errCh <- acceptErr
+			return
+		}
+		acceptCh <- conn
+	}()
+
+	sender, err := net.DialUnix("unix", nil, addr)
+	if err != nil {
+		t.Fatalf("DialUnix() error = %v", err)
+	}
+	defer sender.Close()
+
+	var receiver *net.UnixConn
+	select {
+	case receiver = <-acceptCh:
+	case acceptErr := <-errCh:
+		t.Fatalf("AcceptUnix() error = %v", acceptErr)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for accept")
+	}
+	defer receiver.Close()
+
+	pipeFDs := make([]int, 2)
+	if err := unix.Pipe2(pipeFDs, unix.O_CLOEXEC); err != nil {
+		t.Fatalf("pipe() error = %v", err)
+	}
+	readFD := pipeFDs[0]
+	writeFD := pipeFDs[1]
+	defer func() {
+		if readFD >= 0 {
+			_ = unix.Close(readFD)
+		}
+		if writeFD >= 0 {
+			_ = unix.Close(writeFD)
+		}
+	}()
+
+	oob := unix.UnixRights(readFD, readFD)
+	n, oobn, sendErr := sender.WriteMsgUnix([]byte("m"), oob, nil)
+	if sendErr != nil {
+		t.Fatalf("WriteMsgUnix() error = %v", sendErr)
+	}
+	if n != 1 || oobn != len(oob) {
+		t.Fatalf("WriteMsgUnix() short write: n=%d oobn=%d", n, oobn)
+	}
+
+	if err := unix.Close(readFD); err != nil {
+		t.Fatalf("close original read fd error = %v", err)
+	}
+	readFD = -1
+
+	receivedFD, md, err := recvFD(receiver)
+	if err != nil {
+		t.Fatalf("recvFD() error = %v", err)
+	}
+	if string(md) != "m" {
+		t.Fatalf("unexpected metadata %q", string(md))
+	}
+
+	if err := unix.Close(receivedFD); err != nil {
+		t.Fatalf("close primary received fd error = %v", err)
+	}
+
+	if _, err := unix.Write(writeFD, []byte{1}); !errors.Is(err, unix.EPIPE) {
+		t.Fatalf("expected EPIPE with no leaked extra read fds, got %v", err)
 	}
 }
 

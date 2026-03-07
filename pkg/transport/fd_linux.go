@@ -36,7 +36,7 @@ func recvFD(conn *net.UnixConn) (int, []byte, error) {
 		return -1, nil, errors.New("nil unix connection")
 	}
 	payload := make([]byte, 64*1024)
-	oob := make([]byte, unix.CmsgSpace(4))
+	oob := make([]byte, unix.CmsgSpace(4*16))
 	n, oobn, _, _, err := conn.ReadMsgUnix(payload, oob)
 	if err != nil {
 		return -1, nil, fmt.Errorf("recv fd: %w", err)
@@ -45,14 +45,22 @@ func recvFD(conn *net.UnixConn) (int, []byte, error) {
 	if err != nil {
 		return -1, nil, fmt.Errorf("parse control message: %w", err)
 	}
+	primaryFD := -1
 	for _, cmsg := range cmsgs {
 		fds, err := unix.ParseUnixRights(&cmsg)
 		if err != nil {
 			continue
 		}
-		if len(fds) > 0 {
-			return fds[0], payload[:n], nil
+		for _, receivedFD := range fds {
+			if primaryFD < 0 {
+				primaryFD = receivedFD
+				continue
+			}
+			_ = unix.Close(receivedFD)
 		}
+	}
+	if primaryFD >= 0 {
+		return primaryFD, payload[:n], nil
 	}
 	return -1, nil, errors.New("no fd found in message")
 }
