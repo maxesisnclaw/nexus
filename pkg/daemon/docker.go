@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -72,6 +73,9 @@ func (d *dockerCLI) Stop(container string, grace time.Duration) error {
 	running, checkErr := d.IsRunning(container)
 	if checkErr == nil && running {
 		return fmt.Errorf("docker stop %s: container still running after stop and rm -f", container)
+	}
+	if stopErr != nil && checkErr != nil {
+		return fmt.Errorf("docker stop %s: stop failed and cannot verify state: %w", container, errors.Join(stopErr, checkErr))
 	}
 
 	if stopErr != nil {

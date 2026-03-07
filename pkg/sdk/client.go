@@ -505,6 +505,12 @@ func (c *Client) Serve(ctx context.Context) error {
 			return nil
 		case result := <-acceptCh:
 			if result.err != nil {
+				c.mu.RLock()
+				closed := c.state == clientClosed
+				c.mu.RUnlock()
+				if closed {
+					return nil
+				}
 				return result.err
 			}
 			select {
