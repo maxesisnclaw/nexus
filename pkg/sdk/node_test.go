@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -104,6 +105,9 @@ func TestNewValidationAndDefaults(t *testing.T) {
 			client.cfg.LargePayloadThreshold,
 			client.cfg.RetryBackoff,
 		)
+	}
+	if client.cfg.RegisterRetries != 3 {
+		t.Fatalf("expected default RegisterRetries=3, got %d", client.cfg.RegisterRetries)
 	}
 }
 
@@ -965,10 +969,12 @@ func TestListenTCPAndDualRegister(t *testing.T) {
 		t.Fatalf("New(dual) error = %v", err)
 	}
 	defer dual.Close()
-	dual.register([]registry.Endpoint{
+	if err := dual.register(context.Background(), []registry.Endpoint{
 		{Type: registry.EndpointUDS, Addr: dual.cfg.UDSAddr},
 		{Type: registry.EndpointTCP, Addr: dual.cfg.TCPAddr},
-	})
+	}); err != nil {
+		t.Fatalf("register() error = %v", err)
+	}
 	items := reg.Lookup("svc")
 	if len(items) == 0 {
 		t.Fatal("expected registered dual endpoint service")
@@ -1169,6 +1175,168 @@ func TestServeTCPNoiseRegistersMetadataAndRoutesCalls(t *testing.T) {
 	}
 }
 
+func TestServeReturnsRegistrationErrorAfterRetries(t *testing.T) {
+	node, err := New(Config{
+		Name:            "svc-register-fail",
+		ID:              "svc-register-fail-1",
+		UDSAddr:         testSocketPath(t, "register-fail"),
+		RegisterRetries: 3,
+		RetryBackoff:    time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer node.Close()
+
+	backend := &failingRegistryBackend{registerErr: errors.New("forced register failure")}
+	node.regAPI = backend
+	node.discovery = newRoundRobinDiscovery(backend)
+	node.ownsReg = false
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	err = node.Serve(ctx)
+	if err == nil {
+		t.Fatal("expected Serve() to fail when registration retries are exhausted")
+	}
+	if !strings.Contains(err.Error(), "register service instance") {
+		t.Fatalf("expected registration error context, got %v", err)
+	}
+	if got := backend.registerCalls.Load(); got != 3 {
+		t.Fatalf("expected 3 registration attempts, got %d", got)
+	}
+	if node.state != nodeNew {
+		t.Fatalf("expected node state reset to nodeNew on registration failure, got %d", node.state)
+	}
+}
+
+func TestNoiseTrustedKeysRejectUntrustedRegistryKey(t *testing.T) {
+	reg := registry.New("node-a")
+	defer reg.Close()
+
+	noisePriv, noisePub := transport.GenerateKeypair()
+	server, err := New(Config{
+		Name:            "svc-noise-trusted",
+		ID:              "svc-noise-trusted-1",
+		Registry:        reg,
+		Network:         "tcp",
+		TCPAddr:         "127.0.0.1:0",
+		NoisePrivateKey: noisePriv,
+		NoisePublicKey:  noisePub,
+	})
+	if err != nil {
+		t.Fatalf("New(server) error = %v", err)
+	}
+	defer server.Close()
+	server.Handle("echo", func(req *Request) (*Response, error) {
+		return &Response{Payload: req.Payload}, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.Serve(ctx)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case err := <-serveErr:
+			if err != nil {
+				t.Fatalf("Serve() returned error: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for Serve() shutdown")
+		}
+	}()
+
+	waitForService(t, reg, "svc-noise-trusted", 1)
+	_, otherPub := transport.GenerateKeypair()
+	caller, err := New(Config{
+		Name:             "caller-noise-trusted",
+		ID:               "caller-noise-trusted-1",
+		Registry:         reg,
+		NoisePublicKey:   noisePub,
+		TrustedNoiseKeys: []string{hex.EncodeToString(otherPub)},
+	})
+	if err != nil {
+		t.Fatalf("New(caller) error = %v", err)
+	}
+	defer caller.Close()
+
+	if _, err := caller.Call("svc-noise-trusted", "echo", []byte("ok")); err == nil {
+		t.Fatal("expected call to fail for untrusted noise key")
+	} else if !strings.Contains(err.Error(), "not trusted") {
+		t.Fatalf("expected untrusted key error, got %v", err)
+	}
+}
+
+func TestNoiseWithoutTrustedKeysLogsWarningForRemoteTCP(t *testing.T) {
+	reg := registry.New("node-a")
+	defer reg.Close()
+
+	noisePriv, noisePub := transport.GenerateKeypair()
+	server, err := New(Config{
+		Name:            "svc-noise-warning",
+		ID:              "svc-noise-warning-1",
+		Registry:        reg,
+		Network:         "tcp",
+		TCPAddr:         "127.0.0.1:0",
+		NoisePrivateKey: noisePriv,
+		NoisePublicKey:  noisePub,
+	})
+	if err != nil {
+		t.Fatalf("New(server) error = %v", err)
+	}
+	defer server.Close()
+	server.Handle("echo", func(req *Request) (*Response, error) {
+		return &Response{Payload: append(req.Payload, '!')}, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.Serve(ctx)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case err := <-serveErr:
+			if err != nil {
+				t.Fatalf("Serve() returned error: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for Serve() shutdown")
+		}
+	}()
+
+	waitForService(t, reg, "svc-noise-warning", 1)
+
+	var logs bytes.Buffer
+	caller, err := New(Config{
+		Name:           "caller-noise-warning",
+		ID:             "caller-noise-warning-1",
+		Registry:       reg,
+		NoisePublicKey: noisePub,
+		Logger:         slog.New(slog.NewJSONHandler(&logs, nil)),
+	})
+	if err != nil {
+		t.Fatalf("New(caller) error = %v", err)
+	}
+	defer caller.Close()
+
+	resp, err := caller.Call("svc-noise-warning", "echo", []byte("ok"))
+	if err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if string(resp.Payload) != "ok!" {
+		t.Fatalf("unexpected response payload: %q", string(resp.Payload))
+	}
+	if !strings.Contains(logs.String(), "No trusted Noise keys configured; accepting any authenticated peer") {
+		t.Fatalf("expected warning log for empty trusted keys, got logs: %s", logs.String())
+	}
+}
+
 func waitForService(t *testing.T, reg *registry.Registry, name string, want int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -1198,6 +1366,38 @@ func testSocketPath(t *testing.T, prefix string) string {
 	path := filepath.Join("/tmp", fmt.Sprintf("nexus-sdk-%s-%d.sock", prefix, time.Now().UnixNano()))
 	t.Cleanup(func() { _ = os.Remove(path) })
 	return path
+}
+
+type failingRegistryBackend struct {
+	registerErr   error
+	registerCalls atomic.Int32
+}
+
+func (b *failingRegistryBackend) Register(registry.ServiceInstance) error {
+	b.registerCalls.Add(1)
+	return b.registerErr
+}
+
+func (b *failingRegistryBackend) Unregister(string) {}
+
+func (b *failingRegistryBackend) Heartbeat(string) bool {
+	return false
+}
+
+func (b *failingRegistryBackend) Lookup(string) []registry.ServiceInstance {
+	return nil
+}
+
+func (b *failingRegistryBackend) Watch(string, func(registry.ChangeEvent)) func() {
+	return func() {}
+}
+
+func (b *failingRegistryBackend) NodeID() string {
+	return "node-test"
+}
+
+func (b *failingRegistryBackend) Close() error {
+	return nil
 }
 
 type flakyTransport struct {

@@ -128,6 +128,9 @@ type Config struct {
 	NoisePrivateKey []byte
 	// NoisePublicKey is the optional 32-byte Noise static public key for TCP.
 	NoisePublicKey []byte
+	// TrustedNoiseKeys limits accepted remote Noise server public keys (hex-encoded).
+	// When empty, all authenticated Noise peers are accepted.
+	TrustedNoiseKeys []string
 	// Network controls exposure mode such as uds, tcp, or dual.
 	Network string
 	// RequestTimeout bounds a single outbound call.
@@ -140,6 +143,8 @@ type Config struct {
 	CallRetries int
 	// RetryBackoff is the delay between retries.
 	RetryBackoff time.Duration
+	// RegisterRetries is the number of registration attempts before Serve fails.
+	RegisterRetries int
 	// MaxInboundConns bounds concurrently served inbound connections.
 	MaxInboundConns int
 	// Registry is the service registry backend.
@@ -207,6 +212,8 @@ type Node struct {
 	activeConns   map[transport.Conn]struct{}
 	activeConnsMu sync.Mutex
 	activeWg      sync.WaitGroup
+
+	noiseTrustWarnOnce sync.Once
 }
 
 // New creates a new SDK node instance.
@@ -228,6 +235,9 @@ func New(cfg Config) (*Node, error) {
 	}
 	if cfg.RetryBackoff <= 0 {
 		cfg.RetryBackoff = 100 * time.Millisecond
+	}
+	if cfg.RegisterRetries <= 0 {
+		cfg.RegisterRetries = 3
 	}
 	if cfg.CallRetries < 0 {
 		cfg.CallRetries = 0
@@ -259,11 +269,12 @@ func New(cfg Config) (*Node, error) {
 	}
 	cfg.NoisePrivateKey = append([]byte(nil), cfg.NoisePrivateKey...)
 	cfg.NoisePublicKey = append([]byte(nil), cfg.NoisePublicKey...)
+	cfg.TrustedNoiseKeys = normalizeTrustedNoiseKeys(cfg.TrustedNoiseKeys)
 
 	if cfg.Router == nil {
 		tcpTransport := transport.Transport(transport.NewTCPTransport())
-		if len(cfg.NoisePrivateKey) == 32 || len(cfg.NoisePublicKey) == 32 {
-			tcpTransport = transport.NewNoiseTCPTransport(cfg.NoisePrivateKey, cfg.NoisePublicKey, nil)
+		if len(cfg.NoisePrivateKey) == 32 || len(cfg.NoisePublicKey) == 32 || len(cfg.TrustedNoiseKeys) > 0 {
+			tcpTransport = transport.NewNoiseTCPTransport(cfg.NoisePrivateKey, cfg.NoisePublicKey, cfg.TrustedNoiseKeys)
 		}
 		cfg.Router = transport.NewRouter(transport.NewUDSTransport(), tcpTransport)
 	}
@@ -424,6 +435,7 @@ func (c *Node) callOnce(serviceName, method string, payload []byte, preferFD boo
 	if err != nil {
 		return nil, err
 	}
+	c.warnUntrustedNoise(endpoint)
 	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.RequestTimeout)
 	defer cancel()
 	conn, err := c.connPool.Acquire(ctx, endpoint)
@@ -489,6 +501,7 @@ func (c *Node) callOnceCtx(ctx context.Context, serviceName, method string, payl
 	if err != nil {
 		return nil, err
 	}
+	c.warnUntrustedNoise(endpoint)
 	reqCtx, cancel := context.WithTimeout(ctx, c.cfg.RequestTimeout)
 	defer cancel()
 	conn, err := c.connPool.Acquire(reqCtx, endpoint)
@@ -613,7 +626,18 @@ func (c *Node) Serve(ctx context.Context) error {
 	c.listener = listener
 	c.mu.Unlock()
 
-	c.register(endpoints)
+	if err := c.register(ctx, endpoints); err != nil {
+		_ = listener.Close()
+		c.mu.Lock()
+		if c.listener == listener {
+			c.listener = nil
+		}
+		if c.state == nodeServing {
+			c.state = nodeNew
+		}
+		c.mu.Unlock()
+		return fmt.Errorf("node %s/%s: register service instance: %w", c.cfg.Name, c.cfg.ID, err)
+	}
 	defer c.Close()
 	go c.heartbeatLoop()
 	go func() {
@@ -734,7 +758,7 @@ func (c *Node) Close() error {
 	return nil
 }
 
-func (c *Node) register(endpoints []registry.Endpoint) {
+func (c *Node) register(ctx context.Context, endpoints []registry.Endpoint) error {
 	metadata := c.registrationMetadata(endpoints)
 	inst := registry.ServiceInstance{
 		Name:         c.cfg.Name,
@@ -744,13 +768,37 @@ func (c *Node) register(endpoints []registry.Endpoint) {
 		Endpoints:    append([]registry.Endpoint(nil), endpoints...),
 		Metadata:     metadata,
 	}
-	if err := c.regAPI.Register(inst); err != nil {
-		c.logger.Error("failed to register service instance", "name", inst.Name, "id", inst.ID, "err", err)
-		return
+
+	var lastErr error
+	for attempt := 1; attempt <= c.cfg.RegisterRetries; attempt++ {
+		if err := c.regAPI.Register(inst); err == nil {
+			c.mu.Lock()
+			c.registered = true
+			c.mu.Unlock()
+			return nil
+		} else {
+			lastErr = err
+		}
+		if attempt == c.cfg.RegisterRetries {
+			break
+		}
+		backoff := exponentialBackoff(c.cfg.RetryBackoff, attempt-1)
+		c.logger.Warn(
+			"service registration failed, retrying",
+			"name", inst.Name,
+			"id", inst.ID,
+			"attempt", attempt,
+			"max_attempts", c.cfg.RegisterRetries,
+			"backoff", backoff,
+			"err", lastErr,
+		)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("registration canceled: %w", ctx.Err())
+		case <-time.After(backoff):
+		}
 	}
-	c.mu.Lock()
-	c.registered = true
-	c.mu.Unlock()
+	return lastErr
 }
 
 func (c *Node) heartbeatLoop() {
@@ -782,9 +830,18 @@ func (c *Node) registrationMetadata(endpoints []registry.Endpoint) map[string]st
 
 func (c *Node) tcpServerTransport() transport.Transport {
 	if len(c.cfg.NoisePrivateKey) == 32 && len(c.cfg.NoisePublicKey) == 32 {
-		return transport.NewNoiseTCPTransport(c.cfg.NoisePrivateKey, c.cfg.NoisePublicKey, nil)
+		return transport.NewNoiseTCPTransport(c.cfg.NoisePrivateKey, c.cfg.NoisePublicKey, c.cfg.TrustedNoiseKeys)
 	}
 	return transport.NewTCPTransport()
+}
+
+func (c *Node) warnUntrustedNoise(endpoint transport.ServiceEndpoint) {
+	if endpoint.TCPAddr == "" || len(endpoint.PublicKey) != 32 || len(c.cfg.TrustedNoiseKeys) > 0 {
+		return
+	}
+	c.noiseTrustWarnOnce.Do(func() {
+		c.logger.Warn("No trusted Noise keys configured; accepting any authenticated peer")
+	})
 }
 
 func (c *Node) listen(ctx context.Context) ([]transport.Listener, []registry.Endpoint, error) {
@@ -977,6 +1034,38 @@ func endpointFromInstance(inst registry.ServiceInstance, localNodeID string) (tr
 		return transport.ServiceEndpoint{}, errors.New("instance has no endpoints")
 	}
 	return endpoint, nil
+}
+
+func normalizeTrustedNoiseKeys(keys []string) []string {
+	if len(keys) == 0 {
+		return nil
+	}
+	normalized := make([]string, 0, len(keys))
+	for _, key := range keys {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" {
+			continue
+		}
+		normalized = append(normalized, key)
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
+}
+
+func exponentialBackoff(base time.Duration, exponent int) time.Duration {
+	if base <= 0 {
+		base = 100 * time.Millisecond
+	}
+	backoff := base
+	for i := 0; i < exponent; i++ {
+		if backoff > (1<<62)/2 {
+			return time.Duration(1 << 62)
+		}
+		backoff *= 2
+	}
+	return backoff
 }
 
 func detectLocalNodeID() string {

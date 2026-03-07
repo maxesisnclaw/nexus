@@ -289,11 +289,16 @@ func writeRegistryMessage(w io.Writer, msg any) error {
 	}
 	var hdr [4]byte
 	binary.BigEndian.PutUint32(hdr[:], uint32(len(body)))
-	if _, err := w.Write(hdr[:]); err != nil {
-		return err
+	if err := writeAll(w, hdr[:]); err != nil {
+		return fmt.Errorf("write registry header: %w", err)
 	}
-	_, err = w.Write(body)
-	return err
+	if err := writeAll(w, body); err != nil {
+		return fmt.Errorf("write registry body: %w", err)
+	}
+	if err := flushWriter(w); err != nil {
+		return fmt.Errorf("flush registry writer: %w", err)
+	}
+	return nil
 }
 
 func readRegistryMessage(r io.Reader, out any) error {
@@ -311,6 +316,30 @@ func readRegistryMessage(r io.Reader, out any) error {
 	}
 	if err := msgpack.Unmarshal(buf, out); err != nil {
 		return fmt.Errorf("decode registry message: %w", err)
+	}
+	return nil
+}
+
+func writeAll(w io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
+func flushWriter(w io.Writer) error {
+	type flusher interface {
+		Flush() error
+	}
+	if fw, ok := w.(flusher); ok {
+		return fw.Flush()
 	}
 	return nil
 }
