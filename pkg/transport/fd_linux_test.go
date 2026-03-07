@@ -43,7 +43,7 @@ func TestUDSSendRecvFD(t *testing.T) {
 			return
 		}
 		defer unix.Close(fd)
-		data, err := ReadFDAll(fd)
+		data, err := ReadFDAll(fd, 1<<20)
 		ch <- result{metadata: md, payload: data, err: err}
 	}()
 
@@ -87,7 +87,7 @@ func TestCreateMemfdAndReadFDAll(t *testing.T) {
 	}
 	defer unix.Close(fd)
 
-	got, err := ReadFDAll(fd)
+	got, err := ReadFDAll(fd, int64(len(payload)))
 	if err != nil {
 		t.Fatalf("ReadFDAll() error = %v", err)
 	}
@@ -97,7 +97,7 @@ func TestCreateMemfdAndReadFDAll(t *testing.T) {
 }
 
 func TestReadFDAllInvalidFD(t *testing.T) {
-	if _, err := ReadFDAll(-1); err == nil {
+	if _, err := ReadFDAll(-1, 1024); err == nil {
 		t.Fatal("expected invalid fd error")
 	}
 }
@@ -110,7 +110,7 @@ func TestReadFDAllKeepsCallerFDOpen(t *testing.T) {
 	}
 	defer unix.Close(fd)
 
-	if _, err := ReadFDAll(fd); err != nil {
+	if _, err := ReadFDAll(fd, int64(len(payload))); err != nil {
 		t.Fatalf("ReadFDAll() error = %v", err)
 	}
 	if _, err := unix.Seek(fd, 0, 0); err != nil {

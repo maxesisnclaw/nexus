@@ -10,6 +10,6 @@ func CreateMemfd(string, []byte) (int, error) {
 }
 
 // ReadFDAll is unsupported on non-linux builds.
-func ReadFDAll(int) ([]byte, error) {
+func ReadFDAll(int, int64) ([]byte, error) {
 	return nil, errors.New("fd read unsupported on non-linux")
 }

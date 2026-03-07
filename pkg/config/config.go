@@ -77,6 +77,10 @@ func validate(cfg *Config) error {
 		if svc.Runtime == "docker" && svc.Image == "" {
 			return fmt.Errorf("service %s image is required", svc.Name)
 		}
+		validNetworks := map[string]bool{"uds": true, "tcp": true, "dual": true}
+		if !validNetworks[svc.Network] {
+			return fmt.Errorf("service %s network must be uds, tcp, or dual, got %q", svc.Name, svc.Network)
+		}
 	}
 	return nil
 }

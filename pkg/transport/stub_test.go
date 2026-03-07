@@ -20,7 +20,7 @@ func TestMemfdStubsReturnUnsupported(t *testing.T) {
 	if _, err := CreateMemfd("name", []byte("payload")); err == nil {
 		t.Fatal("expected CreateMemfd unsupported error")
 	}
-	if _, err := ReadFDAll(1); err == nil {
+	if _, err := ReadFDAll(1, 1); err == nil {
 		t.Fatal("expected ReadFDAll unsupported error")
 	}
 }

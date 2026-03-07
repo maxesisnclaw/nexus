@@ -27,7 +27,7 @@ func CreateMemfd(name string, payload []byte) (int, error) {
 	if _, err := f.Seek(0, 0); err != nil {
 		return -1, fmt.Errorf("memfd rewind: %w", err)
 	}
-	dupFD, err := unix.Dup(fd)
+	dupFD, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {
 		return -1, fmt.Errorf("memfd dup: %w", err)
 	}
@@ -35,8 +35,8 @@ func CreateMemfd(name string, payload []byte) (int, error) {
 }
 
 // ReadFDAll reads all bytes from an fd while preserving current offset behavior.
-func ReadFDAll(fd int) ([]byte, error) {
-	dupFD, err := unix.Dup(fd)
+func ReadFDAll(fd int, maxBytes int64) ([]byte, error) {
+	dupFD, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("dup fd: %w", err)
 	}
@@ -50,9 +50,12 @@ func ReadFDAll(fd int) ([]byte, error) {
 		return nil, fmt.Errorf("invalid fd %d", fd)
 	}
 	defer f.Close()
-	b, err := io.ReadAll(f)
+	b, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read fd: %w", err)
+	}
+	if int64(len(b)) > maxBytes {
+		return nil, fmt.Errorf("fd payload exceeds limit of %d bytes", maxBytes)
 	}
 	return b, nil
 }

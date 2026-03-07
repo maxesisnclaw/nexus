@@ -245,8 +245,12 @@ func (c *Client) callOnce(serviceName, method string, payload []byte, preferFD b
 	if err != nil {
 		return nil, err
 	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetReadDeadline(deadline)
+	}
 	reusable := true
 	defer func() {
+		_ = conn.SetReadDeadline(time.Time{})
 		c.connPool.Release(endpoint, conn, reusable)
 	}()
 
@@ -304,8 +308,12 @@ func (c *Client) callOnceCtx(ctx context.Context, serviceName, method string, pa
 	if err != nil {
 		return nil, err
 	}
+	if deadline, ok := reqCtx.Deadline(); ok {
+		_ = conn.SetReadDeadline(deadline)
+	}
 	reusable := true
 	defer func() {
+		_ = conn.SetReadDeadline(time.Time{})
 		c.connPool.Release(endpoint, conn, reusable)
 	}()
 
@@ -359,8 +367,12 @@ func (c *Client) callMsgpackFallbackCtx(ctx context.Context, endpoint transport.
 	if err != nil {
 		return nil, err
 	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetReadDeadline(deadline)
+	}
 	connHealthy := true
 	defer func() {
+		_ = conn.SetReadDeadline(time.Time{})
 		c.connPool.Release(endpoint, conn, connHealthy)
 	}()
 	resp, healthy, err := c.callMsgpack(conn, method, payload)
@@ -603,7 +615,11 @@ func (c *Client) serveConn(conn transport.Conn) {
 			if err := conn.Send(&transport.Message{Method: fdCallMethod, Headers: map[string]string{fdReadyKey: "1"}}); err != nil {
 				return
 			}
+			if c.cfg.ServeTimeout > 0 {
+				_ = conn.SetReadDeadline(time.Now().Add(c.cfg.ServeTimeout))
+			}
 			fd, _, err := conn.RecvFd()
+			_ = conn.SetReadDeadline(time.Time{})
 			if err != nil {
 				if err := conn.Send(&transport.Message{Headers: map[string]string{"error": err.Error()}}); err != nil {
 					c.logger.Debug("send failed", "err", err)
@@ -611,7 +627,7 @@ func (c *Client) serveConn(conn transport.Conn) {
 				}
 				continue
 			}
-			data, err := transport.ReadFDAll(fd)
+			data, err := transport.ReadFDAll(fd, 64<<20) // 64 MiB, matches msgpack transport limit
 			_ = syscall.Close(fd)
 			if err != nil {
 				if err := conn.Send(&transport.Message{Headers: map[string]string{"error": err.Error()}}); err != nil {

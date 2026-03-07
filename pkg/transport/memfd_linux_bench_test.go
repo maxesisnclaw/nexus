@@ -17,7 +17,7 @@ func BenchmarkCreateMemfdAndRead(b *testing.B) {
 		if err != nil {
 			b.Fatalf("CreateMemfd() error = %v", err)
 		}
-		data, err := ReadFDAll(fd)
+		data, err := ReadFDAll(fd, int64(len(payload)))
 		if err != nil {
 			_ = unix.Close(fd)
 			b.Fatalf("ReadFDAll() error = %v", err)
