@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import socket
+import stat
 import struct
 import threading
 from dataclasses import dataclass
@@ -64,8 +65,7 @@ class Client:
             server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server.bind((host, int(port)))
         else:
-            if os.path.exists(addr):
-                os.remove(addr)
+            self._cleanup_socket_path(addr, strict=True)
             os.makedirs(os.path.dirname(addr), exist_ok=True)
             server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             server.bind(addr)
@@ -83,8 +83,8 @@ class Client:
                 threading.Thread(target=self._serve_conn, args=(conn,), daemon=True).start()
         finally:
             server.close()
-            if not use_tcp and os.path.exists(addr):
-                os.remove(addr)
+            if not use_tcp:
+                self._cleanup_socket_path(addr, strict=False)
 
     def close(self):
         self._stop.set()
@@ -137,6 +137,30 @@ class Client:
             unpacker.feed(chunk)
             for obj in unpacker:
                 return obj
+
+    @staticmethod
+    def _cleanup_socket_path(path: str, strict: bool):
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            if strict:
+                raise RuntimeError(f"stat existing socket path failed: {path}: {exc}") from exc
+            return
+
+        if not stat.S_ISSOCK(info.st_mode):
+            if strict:
+                raise RuntimeError(f"uds path exists and is not a socket: {path}")
+            return
+
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            if strict:
+                raise RuntimeError(f"cleanup stale socket failed: {path}: {exc}") from exc
 
 
 def send_fd(sock: socket.socket, fd: int, metadata: bytes = b"fd"):

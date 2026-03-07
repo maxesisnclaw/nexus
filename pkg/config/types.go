@@ -12,7 +12,8 @@ type Config struct {
 
 // DaemonConfig controls nexusd runtime behavior.
 type DaemonConfig struct {
-	// Socket is the daemon UDS socket path.
+	// Socket is reserved for daemon UDS control-plane socket wiring.
+	// Current runtime does not consume this field yet.
 	Socket string `toml:"socket"`
 	// LogLevel configures daemon logging verbosity.
 	LogLevel string `toml:"log_level"`
@@ -20,9 +21,11 @@ type DaemonConfig struct {
 	HealthInterval Duration `toml:"health_interval"`
 	// ShutdownGrace is the graceful stop timeout before force kill.
 	ShutdownGrace Duration `toml:"shutdown_grace"`
-	// Peers lists remote daemon peers for registry sync.
+	// Peers is reserved for future remote daemon registry sync.
+	// Current runtime does not consume this field yet.
 	Peers []PeerConfig `toml:"peers"`
-	// Listen is the optional TCP listen address for cross-node communication.
+	// Listen is reserved for future daemon cross-node TCP listener wiring.
+	// Current runtime does not consume this field yet.
 	Listen string `toml:"listen"`
 }
 

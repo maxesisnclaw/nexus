@@ -917,6 +917,29 @@ func TestListenTCPAndDualRegister(t *testing.T) {
 	}
 }
 
+func TestListenUsesBuiltInServerTransports(t *testing.T) {
+	client, err := New(Config{
+		Name:    "svc",
+		UDSAddr: testSocketPath(t, "listen-built-in"),
+		Router:  transport.NewRouter(nil, nil),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer client.Close()
+
+	listeners, endpoints, err := client.listen(context.Background())
+	if err != nil {
+		t.Fatalf("listen() error = %v", err)
+	}
+	for _, ln := range listeners {
+		_ = ln.Close()
+	}
+	if len(endpoints) != 1 || endpoints[0].Type != registry.EndpointUDS || endpoints[0].Addr == "" {
+		t.Fatalf("unexpected uds endpoint list: %+v", endpoints)
+	}
+}
+
 func TestServeDualNetworkRegistersBoundTCPAndRoutesRemoteOverTCP(t *testing.T) {
 	regLocal := registry.New("node-a")
 	defer regLocal.Close()

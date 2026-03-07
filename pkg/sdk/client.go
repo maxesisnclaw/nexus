@@ -50,7 +50,8 @@ type Config struct {
 	RetryBackoff time.Duration
 	// Registry is the service registry backend.
 	Registry *registry.Registry
-	// Router is the transport router used for dial/listen.
+	// Router is the transport router used for outbound dials.
+	// Serve/listen paths use built-in UDS/TCP transports based on Network.
 	Router *transport.Router
 	// Logger receives SDK logs.
 	Logger *slog.Logger
@@ -84,7 +85,6 @@ type Client struct {
 	registry  *registry.Registry
 	ownsReg   bool
 	discovery *registry.Discovery
-	router    *transport.Router
 	connPool  connectionPool
 
 	handlers map[string]Handler
@@ -144,7 +144,6 @@ func New(cfg Config) (*Client, error) {
 		registry:    cfg.Registry,
 		ownsReg:     ownsReg,
 		discovery:   registry.NewDiscovery(cfg.Registry),
-		router:      cfg.Router,
 		connPool:    newConnectionPool(cfg.Router),
 		handlers:    make(map[string]Handler),
 		heartbeat:   make(chan struct{}),

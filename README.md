@@ -108,7 +108,9 @@ volumes = ["/opt/app/postproc:/app"]
 network = "uds"
 ```
 
-`depends_on` and `health_check` are reserved configuration fields for future dependency/liveness orchestration and are not enforced by the current daemon.
+`daemon.socket`, `daemon.listen`, and `daemon.peers` are reserved daemon control-plane fields for future cross-node/runtime wiring and are not consumed by the current daemon.
+
+`depends_on` and `health_check` are reserved service fields for future dependency/liveness orchestration and are not enforced by the current daemon.
 
 TCP transport currently does not provide built-in authentication or TLS. For this reason, TCP listeners are loopback-only by default. Set `NEXUS_ALLOW_INSECURE_TCP_LISTEN=1` only when you intentionally expose Nexus on a trusted network boundary.
 

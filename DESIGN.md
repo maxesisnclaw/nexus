@@ -80,6 +80,7 @@ nexus/
 socket = "/run/nexus/registry.sock"
 log_level = "info"
 health_interval = "5s"
+# 注意：daemon.socket / daemon.listen / daemon.peers 当前为预留字段，当前版本 daemon 尚未消费这些跨节点控制面配置。
 
 # 单实例组件
 [[service]]
@@ -243,7 +244,7 @@ Python 旧组件通过**原生 Python SDK** 接入（不使用 sidecar）：
 Worker 类型组件需要 `network = "dual"` 配置：
 
 1. 本机 nexusd 启动时，worker 同时监听 UDS 和 TCP
-2. 远端机器运行 nexusd，配置 `peers`：
+2. 远端机器运行 nexusd，配置 `peers`（预留，当前版本尚未启用同步逻辑）：
 
 ```toml
 [daemon]
@@ -254,7 +255,7 @@ socket = "/run/nexus/registry.sock"
 addr = "192.168.1.100:7700"  # 主节点
 ```
 
-3. 两个 nexusd 互相同步注册信息
+3. 两个 nexusd 互相同步注册信息（规划中，当前版本未实现）
 4. 调用远端 worker 时，传输层自动走 TCP
 
 说明：当前 TCP 传输未内置认证和 TLS。为降低默认暴露风险，非 loopback TCP 监听需要显式设置环境变量 `NEXUS_ALLOW_INSECURE_TCP_LISTEN=1`，并应仅用于可信网络边界内。
