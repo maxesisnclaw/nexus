@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import socket
 import struct
 from typing import Tuple
@@ -40,17 +41,28 @@ def recv_fd(sock: socket.socket) -> Tuple[int, bytes]:
     Raises:
         RuntimeError: If no descriptor is found or recvmsg fails.
     """
-    cmsg_space = socket.CMSG_SPACE(struct.calcsize("i"))
+    fd_size = struct.calcsize("i")
+    # Reserve enough ancillary buffer for multi-fd SCM_RIGHTS payloads.
+    cmsg_space = socket.CMSG_SPACE(fd_size * 64)
     try:
         msg, ancdata, _flags, _addr = sock.recvmsg(65536, cmsg_space)
     except OSError as exc:
         raise RuntimeError(f"recvmsg failed: {exc}") from exc
 
+    received_fds: list[int] = []
     for level, ctype, data in ancdata:
         if level == socket.SOL_SOCKET and ctype == socket.SCM_RIGHTS:
-            if len(data) < struct.calcsize("i"):
-                raise RuntimeError("invalid SCM_RIGHTS payload")
-            fd = struct.unpack("i", data[: struct.calcsize("i")])[0]
-            return fd, msg
+            for offset in range(0, len(data) - (len(data) % fd_size), fd_size):
+                received_fds.append(struct.unpack("i", data[offset : offset + fd_size])[0])
 
-    raise RuntimeError("no file descriptor in ancillary data")
+    if not received_fds:
+        raise RuntimeError("no fd received")
+
+    fd = received_fds[0]
+    for extra_fd in received_fds[1:]:
+        try:
+            os.close(extra_fd)
+        except OSError:
+            # Best-effort close for extra descriptors to avoid leaks.
+            continue
+    return fd, msg

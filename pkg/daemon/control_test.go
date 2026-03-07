@@ -314,3 +314,51 @@ func dialControlSocket(t *testing.T, addr string) net.Conn {
 	t.Fatalf("timed out dialing control socket %s", addr)
 	return nil
 }
+
+type deadlineCaptureConn struct {
+	lastReadDeadline time.Time
+}
+
+func (c *deadlineCaptureConn) Read(_ []byte) (int, error)         { return 0, io.EOF }
+func (c *deadlineCaptureConn) Write(b []byte) (int, error)        { return len(b), nil }
+func (c *deadlineCaptureConn) Close() error                       { return nil }
+func (c *deadlineCaptureConn) LocalAddr() net.Addr                { return dummyAddr("local") }
+func (c *deadlineCaptureConn) RemoteAddr() net.Addr               { return dummyAddr("remote") }
+func (c *deadlineCaptureConn) SetDeadline(_ time.Time) error      { return nil }
+func (c *deadlineCaptureConn) SetWriteDeadline(_ time.Time) error { return nil }
+func (c *deadlineCaptureConn) SetReadDeadline(t time.Time) error {
+	c.lastReadDeadline = t
+	return nil
+}
+
+type dummyAddr string
+
+func (a dummyAddr) Network() string { return "test" }
+func (a dummyAddr) String() string  { return string(a) }
+
+func TestControlSessionExtendReadDeadlinePolicy(t *testing.T) {
+	conn := &deadlineCaptureConn{}
+	session := &controlSession{conn: conn}
+
+	if err := session.extendReadDeadline(); err != nil {
+		t.Fatalf("extendReadDeadline() without watch error = %v", err)
+	}
+	got := conn.lastReadDeadline
+	if got.IsZero() {
+		t.Fatal("expected non-zero read deadline for non-watch session")
+	}
+
+	lowerBound := time.Now().Add(controlReadTimeout - 5*time.Second)
+	upperBound := time.Now().Add(controlReadTimeout + 5*time.Second)
+	if got.Before(lowerBound) || got.After(upperBound) {
+		t.Fatalf("read deadline %v outside expected timeout window [%v, %v]", got, lowerBound, upperBound)
+	}
+
+	session.hasWatches = true
+	if err := session.extendReadDeadline(); err != nil {
+		t.Fatalf("extendReadDeadline() with watch error = %v", err)
+	}
+	if !conn.lastReadDeadline.IsZero() {
+		t.Fatalf("expected zero read deadline for watch session, got %v", conn.lastReadDeadline)
+	}
+}

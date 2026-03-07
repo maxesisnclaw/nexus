@@ -191,9 +191,6 @@ func (s *ControlServer) serveConn(conn net.Conn) {
 			}
 			return
 		}
-		if err := session.extendReadDeadline(); err != nil {
-			return
-		}
 		if err := session.handleRequest(req); err != nil {
 			if sendErr := session.send(controlErrorResponse{OK: false, Error: err.Error()}); sendErr != nil {
 				s.logger.Debug("control error response failed", "err", sendErr)
@@ -271,8 +268,10 @@ type controlSession struct {
 
 	writeMu sync.Mutex
 	watchMu sync.Mutex
-	unsubs  []func()
-	once    sync.Once
+	// hasWatches disables the short read timeout for long-lived watch streams.
+	hasWatches bool
+	unsubs     []func()
+	once       sync.Once
 }
 
 func (c *controlSession) Close() {
@@ -350,12 +349,9 @@ func (c *controlSession) handleRequest(req controlRequest) error {
 		if req.Name == "" {
 			return errors.New("watch requires name")
 		}
+		c.hasWatches = true
 		unsub := c.server.registry.Watch(req.Name, func(event registry.ChangeEvent) {
 			if err := c.send(watchEventResponse{Event: string(event.Type), Instance: event.Instance}); err != nil {
-				_ = c.conn.Close()
-				return
-			}
-			if err := c.extendReadDeadline(); err != nil {
 				_ = c.conn.Close()
 			}
 		})
@@ -375,6 +371,9 @@ func (c *controlSession) send(msg any) error {
 }
 
 func (c *controlSession) extendReadDeadline() error {
+	if c.hasWatches {
+		return c.conn.SetReadDeadline(time.Time{})
+	}
 	return c.conn.SetReadDeadline(time.Now().Add(controlReadTimeout))
 }
 

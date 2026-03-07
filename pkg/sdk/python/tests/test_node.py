@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+import nexus_sdk.node as node_module
 from nexus_sdk.node import Node, Request, Response
 from nexus_sdk.registry import RegistryClient
 
@@ -142,5 +143,139 @@ def test_call_missing_service_cleans_round_robin_offset(registry_socket_path: st
         with pytest.raises(RuntimeError, match="service 'missing' not found"):
             node.call("missing", "noop", b"")
         assert "missing" not in node._rr_offsets
+    finally:
+        node.close()
+
+
+def test_call_rejects_non_loopback_tcp_without_override(registry_socket_path: str) -> None:
+    class _RemoteRegistry:
+        def lookup(self, _: str) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": "echo-remote-1",
+                    "node": "remote-node",
+                    "endpoints": [{"type": "tcp", "addr": "10.20.30.40:9000"}],
+                }
+            ]
+
+        def unregister(self, _: str) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    node = Node(name="caller", id="caller-tcp-block", registry_addr=registry_socket_path)
+    node._registry = _RemoteRegistry()  # type: ignore[assignment]
+    try:
+        with pytest.raises(
+            ConnectionError,
+            match=(
+                "Refusing non-loopback TCP call to 10.20.30.40:9000 without encryption. "
+                "Set allow_insecure_tcp=True to override."
+            ),
+        ):
+            node.call("echo", "echo", b"hello")
+    finally:
+        node.close()
+
+
+def test_call_allows_non_loopback_tcp_with_override(monkeypatch: Any, registry_socket_path: str) -> None:
+    class _RemoteRegistry:
+        def lookup(self, _: str) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": "echo-remote-2",
+                    "node": "remote-node",
+                    "endpoints": [{"type": "tcp", "addr": "10.20.30.41:9001"}],
+                }
+            ]
+
+        def unregister(self, _: str) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    class _FakeConn:
+        def close(self) -> None:
+            return
+
+    class _FakePool:
+        def __init__(self) -> None:
+            self.got_addr = ""
+            self.got_use_tcp = False
+
+        def get(self, addr: str, *, use_tcp: bool) -> _FakeConn:
+            self.got_addr = addr
+            self.got_use_tcp = use_tcp
+            return _FakeConn()
+
+        def put(self, _addr: str, _conn: _FakeConn, *, use_tcp: bool) -> None:
+            assert use_tcp
+
+        def close_all(self) -> None:
+            return
+
+    node = Node(
+        name="caller",
+        id="caller-tcp-allow",
+        allow_insecure_tcp=True,
+        registry_addr=registry_socket_path,
+    )
+    pool = _FakePool()
+    node._registry = _RemoteRegistry()  # type: ignore[assignment]
+    node._pool = pool  # type: ignore[assignment]
+    monkeypatch.setattr(node_module, "send_message", lambda _conn, _msg: None)
+    monkeypatch.setattr(node_module, "recv_message", lambda _conn: {"payload": b"ok", "headers": {}})
+    try:
+        resp = node.call("echo", "echo", b"hello")
+        assert resp.payload == b"ok"
+        assert pool.got_use_tcp is True
+        assert pool.got_addr == "10.20.30.41:9001"
+    finally:
+        node.close()
+
+
+def test_pick_endpoint_prefers_local_uds_and_remote_tcp(registry_socket_path: str) -> None:
+    node = Node(name="caller", id="caller-pick", registry_addr=registry_socket_path)
+    try:
+        local_instance = {
+            "node": node._local_node_id,
+            "endpoints": [
+                {"type": "tcp", "addr": "127.0.0.1:9000"},
+                {"type": "uds", "addr": "/tmp/local.sock"},
+            ],
+        }
+        remote_instance = {
+            "node": "remote-node",
+            "endpoints": [
+                {"type": "uds", "addr": "/tmp/remote.sock"},
+                {"type": "tcp", "addr": "127.0.0.1:9001"},
+            ],
+        }
+        unknown_instance = {
+            "endpoints": [
+                {"type": "uds", "addr": "/tmp/unknown.sock"},
+                {"type": "tcp", "addr": "127.0.0.1:9002"},
+            ],
+        }
+        remote_only_uds_instance = {
+            "node": "remote-node",
+            "endpoints": [{"type": "uds", "addr": "/tmp/remote-only.sock"}],
+        }
+
+        local_addr, local_use_tcp = node._pick_endpoint(local_instance)
+        remote_addr, remote_use_tcp = node._pick_endpoint(remote_instance)
+        unknown_addr, unknown_use_tcp = node._pick_endpoint(unknown_instance)
+        fallback_addr, fallback_use_tcp = node._pick_endpoint(remote_only_uds_instance)
+
+        assert local_addr == "/tmp/local.sock"
+        assert local_use_tcp is False
+        assert remote_addr == "127.0.0.1:9001"
+        assert remote_use_tcp is True
+        assert unknown_addr == "127.0.0.1:9002"
+        assert unknown_use_tcp is True
+        assert fallback_addr == "/tmp/remote-only.sock"
+        assert fallback_use_tcp is False
     finally:
         node.close()

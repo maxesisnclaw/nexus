@@ -64,6 +64,7 @@ class Node:
         self._uds_addr = uds_addr
         self._tcp_addr = tcp_addr
         self._allow_insecure_tcp = allow_insecure_tcp
+        self._local_node_id = socket.gethostname()
         self._registry = RegistryClient(registry_addr or DEFAULT_REGISTRY_ADDR)
         self._capabilities = list(capabilities or [])
         self._pool = ConnectionPool()
@@ -136,11 +137,10 @@ class Node:
 
         instance = self._pick_instance(service, instances)
         addr, use_tcp = self._pick_endpoint(instance)
-        if use_tcp and not self._is_loopback_tcp_addr(addr):
-            # TODO: implement Noise Protocol encryption for TCP (parity with Go SDK)
-            logger.warning(
-                "connecting to non-loopback TCP address %s without transport encryption",
-                addr,
+        if use_tcp and not self._allow_insecure_tcp and not self._is_loopback_tcp_addr(addr):
+            raise ConnectionError(
+                f"Refusing non-loopback TCP call to {addr} without encryption. "
+                "Set allow_insecure_tcp=True to override."
             )
         conn = self._pool.get(addr, use_tcp=use_tcp)
 
@@ -420,12 +420,12 @@ class Node:
             self._rr_offsets[service] = (idx + 1) % len(instances)
         return instances[idx]
 
-    @staticmethod
-    def _pick_endpoint(instance: dict[str, object]) -> tuple[str, bool]:
+    def _pick_endpoint(self, instance: dict[str, object]) -> tuple[str, bool]:
         endpoints = instance.get("endpoints")
         if not isinstance(endpoints, list):
             raise RuntimeError("instance has no endpoints")
 
+        uds_addr: str | None = None
         tcp_addr: str | None = None
         for endpoint in endpoints:
             if not isinstance(endpoint, dict):
@@ -435,11 +435,30 @@ class Node:
             if not isinstance(addr, str) or not addr:
                 continue
             if kind == "uds":
-                return addr, False
+                uds_addr = addr
             if kind == "tcp":
                 tcp_addr = addr
-        if tcp_addr:
-            return tcp_addr, True
+
+        instance_node = instance.get("node", "")
+        if isinstance(instance_node, bytes):
+            try:
+                instance_node = instance_node.decode()
+            except UnicodeDecodeError:
+                instance_node = ""
+        if not isinstance(instance_node, str):
+            instance_node = ""
+        is_local_instance = bool(instance_node) and instance_node == self._local_node_id
+
+        if is_local_instance:
+            if uds_addr:
+                return uds_addr, False
+            if tcp_addr:
+                return tcp_addr, True
+        else:
+            if tcp_addr:
+                return tcp_addr, True
+            if uds_addr:
+                return uds_addr, False
         raise RuntimeError("instance has no usable endpoints")
 
     @staticmethod
