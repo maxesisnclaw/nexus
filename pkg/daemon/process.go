@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -232,13 +233,21 @@ func (m *ProcessManager) StopProcess(id string) error {
 		return nil
 	}
 
-	pgid, err := syscall.Getpgid(proc.cmd.Process.Pid)
-	if err != nil {
-		pgid = proc.cmd.Process.Pid
+	pgid, pgidErr := syscall.Getpgid(proc.cmd.Process.Pid)
+	havePgid := pgidErr == nil
+	if pgidErr != nil && errors.Is(pgidErr, syscall.ESRCH) {
+		m.deleteProcessIfMatch(id, proc)
+		return nil
 	}
 
-	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return fmt.Errorf("signal SIGTERM %s: %w", id, err)
+	if havePgid {
+		if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return fmt.Errorf("signal SIGTERM %s: %w", id, err)
+		}
+	} else {
+		if err := proc.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return fmt.Errorf("signal SIGTERM %s: %w", id, err)
+		}
 	}
 	waitCh := proc.exited
 	if waitCh == nil {
@@ -254,8 +263,14 @@ func (m *ProcessManager) StopProcess(id string) error {
 	case <-timer.C:
 	}
 
-	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return fmt.Errorf("signal SIGKILL %s: %w", id, err)
+	if havePgid {
+		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return fmt.Errorf("signal SIGKILL %s: %w", id, err)
+		}
+	} else {
+		if err := proc.cmd.Process.Signal(syscall.SIGKILL); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return fmt.Errorf("signal SIGKILL %s: %w", id, err)
+		}
 	}
 	select {
 	case <-waitCh:
@@ -378,6 +393,10 @@ func (m *ProcessManager) startProcess(ctx context.Context, proc *ManagedProcess)
 	stderrWriter := &prefixWriter{logger: m.logger, id: proc.ID, stream: "stderr"}
 	cmd.Stdout = stdoutWriter
 	cmd.Stderr = stderrWriter
+	if ctx.Err() != nil {
+		m.deleteProcessIfMatch(proc.ID, reservation)
+		return fmt.Errorf("start process %s: %w", proc.ID, ctx.Err())
+	}
 	if err := cmd.Start(); err != nil {
 		m.deleteProcessIfMatch(proc.ID, reservation)
 		return fmt.Errorf("start process %s: %w", proc.ID, err)

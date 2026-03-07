@@ -48,6 +48,8 @@ type Config struct {
 	CallRetries int
 	// RetryBackoff is the delay between retries.
 	RetryBackoff time.Duration
+	// MaxInboundConns bounds concurrently served inbound connections.
+	MaxInboundConns int
 	// Registry is the service registry backend.
 	Registry *registry.Registry
 	// Router is the transport router used for outbound dials.
@@ -121,6 +123,9 @@ func New(cfg Config) (*Client, error) {
 	}
 	if cfg.CallRetries < 0 {
 		cfg.CallRetries = 0
+	}
+	if cfg.MaxInboundConns <= 0 {
+		cfg.MaxInboundConns = 1024
 	}
 	if cfg.Network == "" {
 		cfg.Network = "uds"
@@ -396,6 +401,7 @@ func (c *Client) Serve(ctx context.Context) error {
 		err  error
 	}
 	acceptCh := make(chan acceptResult, len(listeners))
+	connSem := make(chan struct{}, c.cfg.MaxInboundConns)
 	for _, ln := range listeners {
 		ln := ln
 		go func() {
@@ -431,7 +437,16 @@ func (c *Client) Serve(ctx context.Context) error {
 			if result.err != nil {
 				return result.err
 			}
-			go c.serveConn(result.conn)
+			select {
+			case connSem <- struct{}{}:
+				go func(conn transport.Conn) {
+					defer func() { <-connSem }()
+					c.serveConn(conn)
+				}(result.conn)
+			default:
+				c.logger.Warn("max inbound connections reached, rejecting", "limit", c.cfg.MaxInboundConns)
+				_ = result.conn.Close()
+			}
 		}
 	}
 }
