@@ -9,6 +9,7 @@ import (
 	"math"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -33,15 +34,7 @@ func newDockerRuntime(logger *slog.Logger) dockerRuntime {
 
 func (d *dockerCLI) Start(ctx context.Context, proc *ManagedProcess) (string, error) {
 	name := dockerContainerName(proc)
-	args := []string{"run", "-d", "--name", name}
-	for _, v := range proc.Spec.Volumes {
-		args = append(args, "-v", v)
-	}
-	if proc.Spec.Network == "uds" || proc.Spec.Network == "dual" {
-		args = append(args, "-v", "/run/nexus:/run/nexus")
-	}
-	args = append(args, proc.Spec.Image)
-	args = append(args, proc.Args...)
+	args := dockerRunArgs(proc, name)
 
 	cmd := execCommandContext(ctx, "docker", args...)
 	out, err := cmd.CombinedOutput()
@@ -51,6 +44,43 @@ func (d *dockerCLI) Start(ctx context.Context, proc *ManagedProcess) (string, er
 	id := strings.TrimSpace(string(out))
 	d.logger.Info("docker container started", "service", proc.Service, "id", proc.ID, "container", name, "container_id", id)
 	return name, nil
+}
+
+func dockerRunArgs(proc *ManagedProcess, name string) []string {
+	args := []string{"run", "-d", "--name", name}
+	if proc.Spec.DockerNetwork != "" {
+		args = append(args, "--network", proc.Spec.DockerNetwork)
+	}
+
+	envKeys := make([]string, 0, len(proc.Spec.Env))
+	for key := range proc.Spec.Env {
+		envKeys = append(envKeys, key)
+	}
+	sort.Strings(envKeys)
+	for _, key := range envKeys {
+		args = append(args, "-e", fmt.Sprintf("%s=%s", key, proc.Spec.Env[key]))
+	}
+
+	for _, volume := range proc.Spec.Volumes {
+		args = append(args, "-v", volume)
+	}
+	for _, port := range proc.Spec.Ports {
+		args = append(args, "-p", port)
+	}
+	for _, cap := range proc.Spec.CapAdd {
+		args = append(args, "--cap-add", cap)
+	}
+	for _, cap := range proc.Spec.CapDrop {
+		args = append(args, "--cap-drop", cap)
+	}
+
+	if proc.Spec.Network == "uds" || proc.Spec.Network == "dual" {
+		args = append(args, "-v", "/run/nexus:/run/nexus")
+	}
+	args = append(args, proc.Spec.ExtraArgs...)
+	args = append(args, proc.Spec.Image)
+	args = append(args, proc.Args...)
+	return args
 }
 
 func (d *dockerCLI) Stop(container string, grace time.Duration) error {

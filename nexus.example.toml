@@ -1,0 +1,131 @@
+# nexus.example.toml
+#
+# Nexus v0.4 Phase 1 configuration example.
+# This file documents all currently supported configuration fields and their defaults.
+
+[daemon]
+# UDS path for the daemon control/registry socket.
+# Default: "/run/nexus/registry.sock"
+socket = "/run/nexus/registry.sock"
+
+# Log level for daemon logs.
+# Typical values: "debug", "info", "warn", "error"
+# Default: "info"
+log_level = "info"
+
+# Health monitor interval.
+# Default: "5s"
+health_interval = "5s"
+
+# Grace period for shutdown before force kill.
+# Default: "10s"
+shutdown_grace = "10s"
+
+# Reserved for future cross-node listener.
+# Current daemon does not consume this field.
+listen = ""
+
+# Reserved for future peer registry sync.
+# Current daemon does not consume this field.
+[[daemon.peers]]
+addr = "192.168.1.100:7700"
+
+# Binary singleton service example.
+[[service]]
+# Required: unique service name.
+name = "gateway"
+
+# Service type: "singleton" or "worker".
+# Default: "singleton"
+type = "singleton"
+
+# Runtime: "binary" or "docker".
+# Default: "binary"
+runtime = "binary"
+
+# Required for binary runtime: absolute executable path.
+binary = "/opt/nexus/bin/gateway"
+
+# Optional for binary runtime: working directory.
+# If empty, defaults to dirname(binary).
+work_dir = "/opt/nexus"
+
+# Startup arguments for this service/instance.
+args = ["--config", "/etc/nexus/gateway.toml"]
+
+# Environment variables injected into process/container.
+# Binary runtime: merged onto inherited OS environment.
+# Docker runtime: translated to "-e KEY=VALUE".
+env = { GATEWAY_MODE = "prod", LOG_FORMAT = "json" }
+
+# Optional docker-only fields are safe to omit for binary services.
+volumes = []
+ports = []
+cap_add = []
+cap_drop = []
+docker_network = ""
+extra_args = []
+
+# Reserved metadata for dependency ordering (not enforced yet).
+depends_on = ["auth"]
+
+# Reserved health probe endpoint (not enforced yet).
+health_check = "tcp://127.0.0.1:9001/health"
+
+# Transport exposure mode: "uds", "tcp", or "dual".
+# Default: "uds"
+network = "uds"
+
+# singleton must not define instances.
+instances = []
+
+# Docker worker service example.
+[[service]]
+name = "legacy-postproc"
+type = "worker"
+runtime = "docker"
+
+# Required for docker runtime.
+image = "registry.example.com/legacy/postproc:1.2.3"
+
+# Binary-only field; keep empty for docker services.
+binary = ""
+work_dir = ""
+
+# Service-level default args (can be overridden by instance args below).
+args = ["--serve"]
+
+# Docker env vars are emitted in deterministic key order.
+env = { APP_MODE = "prod", FEATURE_FLAG = "on" }
+
+# Docker bind mounts (-v).
+volumes = [
+  "/opt/nexus/postproc:/app",
+  "/var/lib/nexus/cache:/cache",
+]
+
+# Docker ports (-p): hostPort:containerPort or hostPort:containerPort/proto.
+ports = ["8080:80", "8443:443/tcp"]
+
+# Docker capability controls.
+cap_add = ["NET_ADMIN"]
+cap_drop = ["ALL"]
+
+# Docker network mode (--network), e.g. host/bridge/none/custom.
+docker_network = "bridge"
+
+# Escape hatch: raw docker run flags appended before image.
+extra_args = ["--restart", "always", "--log-driver", "json-file"]
+
+# Reserved metadata for dependency ordering/health checks.
+depends_on = ["gateway"]
+health_check = ""
+
+# "dual" mounts /run/nexus into the container for UDS access.
+network = "dual"
+
+# worker requires at least one instance.
+instances = [
+  { id = "legacy-postproc-vehicle", args = ["--profile", "vehicle"] },
+  { id = "legacy-postproc-person", args = ["--profile", "person"] },
+]

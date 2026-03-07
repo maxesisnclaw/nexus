@@ -45,12 +45,26 @@ type ServiceSpec struct {
 	Runtime string `toml:"runtime"`
 	// Binary is the executable path for binary runtime.
 	Binary string `toml:"binary"`
+	// WorkDir is the working directory for binary runtime.
+	WorkDir string `toml:"work_dir"`
 	// Image is the container image for docker runtime.
 	Image string `toml:"image"`
 	// Args are default startup arguments.
 	Args []string `toml:"args"`
+	// Env contains environment variables for binary and docker runtimes.
+	Env map[string]string `toml:"env"`
 	// Volumes lists docker bind mounts.
 	Volumes []string `toml:"volumes"`
+	// Ports lists docker port mappings like host:container or host:container/proto.
+	Ports []string `toml:"ports"`
+	// CapAdd lists Linux capabilities to add for docker runtime.
+	CapAdd []string `toml:"cap_add"`
+	// CapDrop lists Linux capabilities to drop for docker runtime.
+	CapDrop []string `toml:"cap_drop"`
+	// DockerNetwork sets docker --network mode.
+	DockerNetwork string `toml:"docker_network"`
+	// ExtraArgs appends raw docker run flags.
+	ExtraArgs []string `toml:"extra_args"`
 	// DependsOn lists service names this service depends on. Reserved for future use; currently not enforced by the daemon.
 	DependsOn []string `toml:"depends_on"`
 	// HealthCheck endpoint for liveness probing. Reserved for future use; currently not enforced by the daemon.

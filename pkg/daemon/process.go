@@ -8,6 +8,9 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -390,8 +393,7 @@ func (m *ProcessManager) startProcess(ctx context.Context, proc *ManagedProcess)
 		return fmt.Errorf("service %s runtime %s not supported in process manager", proc.Service, proc.Spec.Runtime)
 	}
 
-	cmd := exec.Command(proc.Spec.Binary, proc.Args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd := buildBinaryCommand(proc.Spec, proc.Args)
 	stdoutWriter := &prefixWriter{logger: m.logger, id: proc.ID, stream: "stdout"}
 	stderrWriter := &prefixWriter{logger: m.logger, id: proc.ID, stream: "stderr"}
 	cmd.Stdout = stdoutWriter
@@ -445,6 +447,51 @@ func (m *ProcessManager) startProcess(ctx context.Context, proc *ManagedProcess)
 		m.deleteProcessIfMatch(p.ID, p)
 	}(proc, cmd, proc.exited, stdoutWriter, stderrWriter)
 	return nil
+}
+
+func buildBinaryCommand(spec config.ServiceSpec, args []string) *exec.Cmd {
+	cmd := exec.Command(spec.Binary, args...)
+	if spec.WorkDir != "" {
+		cmd.Dir = spec.WorkDir
+	} else {
+		cmd.Dir = filepath.Dir(spec.Binary)
+	}
+	cmd.Env = mergeEnvironment(os.Environ(), spec.Env)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	return cmd
+}
+
+func mergeEnvironment(base []string, overlay map[string]string) []string {
+	out := append([]string(nil), base...)
+	if len(overlay) == 0 {
+		return out
+	}
+
+	index := make(map[string]int, len(out))
+	for i, kv := range out {
+		pos := strings.IndexByte(kv, '=')
+		if pos <= 0 {
+			continue
+		}
+		index[kv[:pos]] = i
+	}
+
+	keys := make([]string, 0, len(overlay))
+	for key := range overlay {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		entry := key + "=" + overlay[key]
+		if i, ok := index[key]; ok {
+			out[i] = entry
+			continue
+		}
+		index[key] = len(out)
+		out = append(out, entry)
+	}
+	return out
 }
 
 func (m *ProcessManager) deleteProcess(id string) {
