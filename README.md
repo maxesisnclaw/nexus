@@ -1,31 +1,23 @@
 # Nexus
 
-Nexus is a lightweight microservice foundation focused on local-process orchestration, service registry/discovery, and high-performance IPC.
+Nexus is a lightweight microservice foundation for Linux, focused on process orchestration, service registry/discovery, and high-performance IPC.
 
-- Language: Go
-- Supported platform: Linux (kernel >= 4.19 for full feature set)
-- IPC protocol: msgpack over UDS/TCP
-- Large payload path: memfd + `SCM_RIGHTS` (Linux)
+## Features (v0.4)
 
-## Architecture
+- Daemon-managed service lifecycle (`singleton` / `worker`)
+- UDS control plane (`daemon.socket`) with msgpack protocol
+- Dependency-aware startup ordering with `depends_on` (topological sort)
+- Probe-based health checks (`exec://`, `http://`, `tcp://`) with PID fallback
+- Transport abstraction: UDS/TCP + msgpack
+- Noise-encrypted TCP transport (NK handshake)
+- memfd + `SCM_RIGHTS` for large local payload transfer
+- Go SDK with `Node`, `HandleFunc`, and remote registry support (`RegistryAddr`)
+- CLI tools: `nexusd validate`, `nexusd status`, `nexusd keygen`
 
-```text
-+--------------------------------------------------------------+
-|                           nexusd                             |
-|  +-----------------+  +-------------------+  +------------+  |
-|  | Process Manager |  | Service Registry  |  |  Health    |  |
-|  | start/stop/retry|  | lookup/watch/sync |  | monitoring |  |
-|  +-----------------+  +-------------------+  +------------+  |
-+----------------------------+---------------------------------+
-                             |
-         +-------------------+-------------------+
-         |                                       |
-   +-----v----------------+              +-------v--------------+
-   | local services       |              | remote services      |
-   | UDS + msgpack        |              | TCP + msgpack        |
-   | optional memfd fd    |              | standard payload     |
-   +----------------------+              +----------------------+
-```
+## Requirements
+
+- Go
+- Linux (kernel >= 4.19 for full feature set)
 
 ## Quick Start
 
@@ -41,116 +33,85 @@ CGO_ENABLED=0 go build ./cmd/nexusd
 ./nexusd -config ./nexus.toml
 ```
 
-3. Run tests:
+3. Minimal Go SDK node example (`Node`, not `Client`):
+
+```go
+package main
+
+import (
+	"github.com/maxesisn/nexus/pkg/sdk"
+)
+
+func main() {
+	node, err := sdk.New(sdk.Config{
+		Name:         "echo",
+		ID:           "echo-1",
+		UDSAddr:      "/run/nexus/echo.sock",
+		RegistryAddr: "/run/nexus/registry.sock",
+	})
+	if err != nil {
+		panic(err)
+	}
+	defer node.Close()
+
+	node.HandleFunc("echo", func(req *sdk.Request) (*sdk.Response, error) {
+		return &sdk.Response{Payload: req.Payload}, nil
+	})
+
+	if err := node.Serve(); err != nil {
+		panic(err)
+	}
+}
+```
+
+4. Run checks:
 
 ```bash
+go build ./...
+go vet ./...
 go test ./...
-go test -race ./...
-```
-
-4. Run Linux integration tests inside Docker:
-
-```bash
-docker build -t nexus-test -f Dockerfile.test .
-docker run --rm -v $(pwd):/workspace -w /workspace nexus-test go test -v -race ./...
-docker run --rm --cap-add SYS_PTRACE --cap-add NET_ADMIN -v $(pwd):/workspace -w /workspace nexus-test go test -v -tags integration ./...
-```
-
-## Installation
-
-### From Source
-
-```bash
-git clone https://github.com/maxesisnclaw/nexus.git
-cd nexus
-CGO_ENABLED=0 go build ./...
-```
-
-### Docker Image
-
-```bash
-docker build -t nexusd:local .
 ```
 
 ## Configuration Reference
 
-Nexus uses TOML.
+- Full configuration and protocol design: [DESIGN.md](DESIGN.md)
+- Ready-to-edit example: [`nexus.example.toml`](nexus.example.toml)
 
-```toml
-[daemon]
-socket = "/run/nexus/registry.sock"
-log_level = "info"
-health_interval = "5s"
-shutdown_grace = "10s"
-listen = "127.0.0.1:7700"
+## CLI Usage
 
-[[daemon.peers]]
-addr = "192.168.1.100:7700"
-
-[[service]]
-name = "detector"
-type = "worker"
-runtime = "binary"
-binary = "/opt/app/detector"
-args = ["--model", "vehicle"]
-network = "dual"
-instances = [
-  { id = "detector-1", args = ["--shard", "a"] },
-  { id = "detector-2", args = ["--shard", "b"] },
-]
-
-[[service]]
-name = "legacy-postproc"
-type = "singleton"
-runtime = "docker"
-image = "app/postproc:latest"
-volumes = ["/opt/app/postproc:/app"]
-network = "uds"
-```
-
-`daemon.socket`, `daemon.listen`, and `daemon.peers` are reserved daemon control-plane fields for future cross-node/runtime wiring and are not consumed by the current daemon.
-
-`depends_on` and `health_check` are reserved service fields for future dependency/liveness orchestration and are not enforced by the current daemon.
-
-TCP transport currently does not provide built-in authentication or TLS. For this reason, TCP listeners are loopback-only by default. Set `NEXUS_ALLOW_INSECURE_TCP_LISTEN=1` only when you intentionally expose Nexus on a trusted network boundary.
-
-## SDK Examples
-
-### Go SDK
-
-```go
-reg := registry.New("node-a")
-client, _ := sdk.New(sdk.Config{Name: "echo", ID: "echo-1", Registry: reg, UDSAddr: "/tmp/echo.sock"})
-client.Handle("echo", func(req *sdk.Request) (*sdk.Response, error) {
-    return &sdk.Response{Payload: req.Payload}, nil
-})
-```
-
-### Python SDK
-
-A minimal/experimental Python SDK is available at `pkg/sdk/python/nexus_sdk.py` (UDS/TCP msgpack client/server helpers plus FD passing helpers).
-
-See runnable programs in [`examples/`](examples/README.md).
-
-## Development
-
-Use the provided `Makefile`:
+Validate config:
 
 ```bash
-make build
-make test
-make race
-make docker-test
-make docker-integration
+nexusd validate -config ./nexus.toml
 ```
 
-## Contributing
+Query daemon status:
 
-1. Fork and create a feature branch.
-2. Add tests for all behavior changes.
-3. Run `make vet test race` and Linux Docker integration tests.
-4. Keep APIs documented and backwards compatible.
-5. Submit a focused pull request with clear commit history.
+```bash
+nexusd status -socket /run/nexus/registry.sock
+```
+
+Generate Noise keypair:
+
+```bash
+nexusd keygen -out ./nexus.key
+```
+
+## Security
+
+Nexus v0.4 uses two trust models:
+
+- UDS trust model: access control by filesystem permissions on `/run/nexus/*` sockets.
+- TCP trust model: Noise Protocol encryption/authentication (NK pattern, Curve25519 + ChaCha20-Poly1305).
+
+For TCP listeners, configure:
+- `daemon.listen`
+- `daemon.noise_key_file`
+- optional `daemon.trusted_keys` for strict peer key allow-listing
+
+## Examples
+
+Runnable examples are available in [`examples/`](examples/README.md).
 
 ## Changelog
 
