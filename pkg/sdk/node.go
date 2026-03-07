@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,8 @@ import (
 const (
 	fdCallMethod = "__nexus_fd_call__"
 	fdReadyKey   = "ready_fd"
+
+	tcpNoisePublicKeyMetadata = "tcp_noise_public_key"
 )
 
 var createMemfd = transport.CreateMemfd
@@ -121,6 +124,10 @@ type Config struct {
 	UDSAddr string
 	// TCPAddr is the service TCP listen address.
 	TCPAddr string
+	// NoisePrivateKey is the optional 32-byte Noise static private key for TCP.
+	NoisePrivateKey []byte
+	// NoisePublicKey is the optional 32-byte Noise static public key for TCP.
+	NoisePublicKey []byte
 	// Network controls exposure mode such as uds, tcp, or dual.
 	Network string
 	// RequestTimeout bounds a single outbound call.
@@ -231,8 +238,34 @@ func New(cfg Config) (*Node, error) {
 	if cfg.Network == "" {
 		cfg.Network = "uds"
 	}
+	if len(cfg.NoisePrivateKey) > 0 && len(cfg.NoisePrivateKey) != 32 {
+		return nil, fmt.Errorf("noise private key must be 32 bytes, got %d", len(cfg.NoisePrivateKey))
+	}
+	if len(cfg.NoisePublicKey) > 0 && len(cfg.NoisePublicKey) != 32 {
+		return nil, fmt.Errorf("noise public key must be 32 bytes, got %d", len(cfg.NoisePublicKey))
+	}
+	if len(cfg.NoisePrivateKey) > 0 && len(cfg.NoisePublicKey) == 0 {
+		pub, err := transport.DerivePublicKey(cfg.NoisePrivateKey)
+		if err != nil {
+			return nil, err
+		}
+		cfg.NoisePublicKey = pub
+	}
+	mode := strings.ToLower(cfg.Network)
+	if mode == "tcp" || mode == "dual" {
+		if cfg.TCPAddr != "" && len(cfg.NoisePublicKey) == 32 && len(cfg.NoisePrivateKey) == 0 {
+			return nil, errors.New("noise private key is required for tcp listening when noise public key is set")
+		}
+	}
+	cfg.NoisePrivateKey = append([]byte(nil), cfg.NoisePrivateKey...)
+	cfg.NoisePublicKey = append([]byte(nil), cfg.NoisePublicKey...)
+
 	if cfg.Router == nil {
-		cfg.Router = transport.NewRouter(transport.NewUDSTransport(), transport.NewTCPTransport())
+		tcpTransport := transport.Transport(transport.NewTCPTransport())
+		if len(cfg.NoisePrivateKey) == 32 || len(cfg.NoisePublicKey) == 32 {
+			tcpTransport = transport.NewNoiseTCPTransport(cfg.NoisePrivateKey, cfg.NoisePublicKey, nil)
+		}
+		cfg.Router = transport.NewRouter(transport.NewUDSTransport(), tcpTransport)
 	}
 	logger := cfg.Logger
 	if logger == nil {
@@ -702,12 +735,14 @@ func (c *Node) Close() error {
 }
 
 func (c *Node) register(endpoints []registry.Endpoint) {
+	metadata := c.registrationMetadata(endpoints)
 	inst := registry.ServiceInstance{
 		Name:         c.cfg.Name,
 		ID:           c.cfg.ID,
 		Capabilities: c.cfg.Capabilities,
 		TTL:          15 * time.Second,
 		Endpoints:    append([]registry.Endpoint(nil), endpoints...),
+		Metadata:     metadata,
 	}
 	if err := c.regAPI.Register(inst); err != nil {
 		c.logger.Error("failed to register service instance", "name", inst.Name, "id", inst.ID, "err", err)
@@ -729,6 +764,27 @@ func (c *Node) heartbeatLoop() {
 			_ = c.regAPI.Heartbeat(c.cfg.ID)
 		}
 	}
+}
+
+func (c *Node) registrationMetadata(endpoints []registry.Endpoint) map[string]string {
+	if len(c.cfg.NoisePrivateKey) != 32 || len(c.cfg.NoisePublicKey) != 32 {
+		return nil
+	}
+	for _, ep := range endpoints {
+		if ep.Type == registry.EndpointTCP {
+			return map[string]string{
+				tcpNoisePublicKeyMetadata: hex.EncodeToString(c.cfg.NoisePublicKey),
+			}
+		}
+	}
+	return nil
+}
+
+func (c *Node) tcpServerTransport() transport.Transport {
+	if len(c.cfg.NoisePrivateKey) == 32 && len(c.cfg.NoisePublicKey) == 32 {
+		return transport.NewNoiseTCPTransport(c.cfg.NoisePrivateKey, c.cfg.NoisePublicKey, nil)
+	}
+	return transport.NewTCPTransport()
 }
 
 func (c *Node) listen(ctx context.Context) ([]transport.Listener, []registry.Endpoint, error) {
@@ -762,7 +818,7 @@ func (c *Node) listen(ctx context.Context) ([]transport.Listener, []registry.End
 		if err := addListener(transport.NewUDSTransport(), registry.EndpointUDS, c.cfg.UDSAddr); err != nil {
 			return nil, nil, err
 		}
-		if err := addListener(transport.NewTCPTransport(), registry.EndpointTCP, c.cfg.TCPAddr); err != nil {
+		if err := addListener(c.tcpServerTransport(), registry.EndpointTCP, c.cfg.TCPAddr); err != nil {
 			closeListeners()
 			return nil, nil, err
 		}
@@ -770,7 +826,7 @@ func (c *Node) listen(ctx context.Context) ([]transport.Listener, []registry.End
 		if c.cfg.TCPAddr == "" {
 			return nil, nil, errors.New("tcp network requires tcp_addr")
 		}
-		if err := addListener(transport.NewTCPTransport(), registry.EndpointTCP, c.cfg.TCPAddr); err != nil {
+		if err := addListener(c.tcpServerTransport(), registry.EndpointTCP, c.cfg.TCPAddr); err != nil {
 			return nil, nil, err
 		}
 	case "uds":
@@ -906,6 +962,16 @@ func endpointFromInstance(inst registry.ServiceInstance, localNodeID string) (tr
 		case registry.EndpointTCP:
 			endpoint.TCPAddr = ep.Addr
 		}
+	}
+	if encoded := strings.TrimSpace(inst.Metadata[tcpNoisePublicKeyMetadata]); encoded != "" {
+		pub, err := hex.DecodeString(encoded)
+		if err != nil {
+			return transport.ServiceEndpoint{}, fmt.Errorf("decode tcp noise public key metadata: %w", err)
+		}
+		if len(pub) != 32 {
+			return transport.ServiceEndpoint{}, fmt.Errorf("invalid tcp noise public key length: %d", len(pub))
+		}
+		endpoint.PublicKey = pub
 	}
 	if endpoint.UDSAddr == "" && endpoint.TCPAddr == "" {
 		return transport.ServiceEndpoint{}, errors.New("instance has no endpoints")

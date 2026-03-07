@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"sync"
 
@@ -107,6 +108,9 @@ func endpointPoolKey(endpoint transport.ServiceEndpoint) string {
 		return "uds:" + endpoint.UDSAddr
 	}
 	if endpoint.TCPAddr != "" {
+		if len(endpoint.PublicKey) > 0 {
+			return "tcp:" + endpoint.TCPAddr + "#" + hex.EncodeToString(endpoint.PublicKey)
+		}
 		return "tcp:" + endpoint.TCPAddr
 	}
 	return "uds:" + endpoint.UDSAddr

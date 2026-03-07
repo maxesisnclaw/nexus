@@ -3,6 +3,7 @@ package sdk
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -635,6 +636,27 @@ func TestEndpointFromInstanceErrors(t *testing.T) {
 	}
 }
 
+func TestEndpointFromInstanceParsesNoisePublicKeyMetadata(t *testing.T) {
+	_, pub := transport.GenerateKeypair()
+	ep, err := endpointFromInstance(registry.ServiceInstance{
+		Name: "svc",
+		ID:   "svc-1",
+		Node: "node-b",
+		Endpoints: []registry.Endpoint{
+			{Type: registry.EndpointTCP, Addr: "127.0.0.1:9000"},
+		},
+		Metadata: map[string]string{
+			tcpNoisePublicKeyMetadata: hex.EncodeToString(pub),
+		},
+	}, "node-a")
+	if err != nil {
+		t.Fatalf("endpointFromInstance() error = %v", err)
+	}
+	if !bytes.Equal(ep.PublicKey, pub) {
+		t.Fatalf("unexpected parsed noise public key: got=%x want=%x", ep.PublicKey, pub)
+	}
+}
+
 func TestDispatchHandlerNotFound(t *testing.T) {
 	node, err := New(Config{Name: "svc", UDSAddr: filepath.Join(t.TempDir(), "svc.sock")})
 	if err != nil {
@@ -1073,6 +1095,74 @@ func TestServeDualNetworkRegistersBoundTCPAndRoutesRemoteOverTCP(t *testing.T) {
 	resp, err := remoteCaller.Call("svc", "echo", []byte("ok"))
 	if err != nil {
 		t.Fatalf("remote Call() error = %v", err)
+	}
+	if string(resp.Payload) != "ok!" {
+		t.Fatalf("unexpected response payload: %q", string(resp.Payload))
+	}
+}
+
+func TestServeTCPNoiseRegistersMetadataAndRoutesCalls(t *testing.T) {
+	reg := registry.New("node-a")
+	defer reg.Close()
+
+	noisePriv, noisePub := transport.GenerateKeypair()
+	server, err := New(Config{
+		Name:            "svc-noise",
+		ID:              "svc-noise-1",
+		Registry:        reg,
+		Network:         "tcp",
+		TCPAddr:         "127.0.0.1:0",
+		NoisePrivateKey: noisePriv,
+		NoisePublicKey:  noisePub,
+	})
+	if err != nil {
+		t.Fatalf("New(server) error = %v", err)
+	}
+	defer server.Close()
+	server.Handle("echo", func(req *Request) (*Response, error) {
+		return &Response{Payload: append(req.Payload, '!')}, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.Serve(ctx)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case err := <-serveErr:
+			if err != nil {
+				t.Fatalf("Serve() returned error: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for Serve() shutdown")
+		}
+	}()
+
+	waitForService(t, reg, "svc-noise", 1)
+	items := reg.Lookup("svc-noise")
+	if len(items) != 1 {
+		t.Fatalf("expected one service entry, got %+v", items)
+	}
+	if got := items[0].Metadata[tcpNoisePublicKeyMetadata]; got != hex.EncodeToString(noisePub) {
+		t.Fatalf("unexpected registered noise public key metadata: %q", got)
+	}
+
+	caller, err := New(Config{
+		Name:           "caller-noise",
+		ID:             "caller-noise-1",
+		Registry:       reg,
+		NoisePublicKey: noisePub, // enables Noise TCP dialer selection
+	})
+	if err != nil {
+		t.Fatalf("New(caller) error = %v", err)
+	}
+	defer caller.Close()
+
+	resp, err := caller.Call("svc-noise", "echo", []byte("ok"))
+	if err != nil {
+		t.Fatalf("Call() error = %v", err)
 	}
 	if string(resp.Payload) != "ok!" {
 		t.Fatalf("unexpected response payload: %q", string(resp.Payload))

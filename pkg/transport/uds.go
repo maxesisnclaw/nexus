@@ -11,6 +11,8 @@ import (
 )
 
 // UDSTransport implements unix domain socket transport.
+// UDS connections are not encrypted. Trust is established through
+// filesystem permissions (socket file mode 0600).
 type UDSTransport struct{}
 
 // NewUDSTransport creates a UDS transport.

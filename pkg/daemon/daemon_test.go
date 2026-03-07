@@ -221,6 +221,54 @@ func TestDaemonStartFailureResetsState(t *testing.T) {
 	}
 }
 
+func TestDaemonStartRejectsTCPListenWithoutNoiseKey(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	cfg := &config.Config{
+		Daemon: config.DaemonConfig{
+			HealthInterval: config.Duration{Duration: 100 * time.Millisecond},
+			ShutdownGrace:  config.Duration{Duration: time.Second},
+			Listen:         "127.0.0.1:0",
+		},
+	}
+	d, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := d.Start(ctx); err == nil {
+		t.Fatal("expected Start() to fail without daemon.noise_key_file")
+	}
+}
+
+func TestDaemonStartWithNoiseTCPListener(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	keyFile := filepath.Join(t.TempDir(), "daemon-noise.key")
+	cfg := &config.Config{
+		Daemon: config.DaemonConfig{
+			HealthInterval: config.Duration{Duration: 100 * time.Millisecond},
+			ShutdownGrace:  config.Duration{Duration: time.Second},
+			Listen:         "127.0.0.1:0",
+			NoiseKeyFile:   keyFile,
+		},
+	}
+	d, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := d.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if _, err := os.Stat(keyFile); err != nil {
+		t.Fatalf("expected generated noise key file: %v", err)
+	}
+	if err := d.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+}
+
 func TestDaemonRestartServiceNotFound(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	d, err := New(&config.Config{

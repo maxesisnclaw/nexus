@@ -32,6 +32,8 @@ type ServiceEndpoint struct {
 	UDSAddr string
 	// TCPAddr is the TCP address.
 	TCPAddr string
+	// PublicKey is the Noise static public key for TCP encryption.
+	PublicKey []byte
 }
 
 // Transport is the common abstraction over different network transports.

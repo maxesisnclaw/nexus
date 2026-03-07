@@ -25,6 +25,11 @@ type DaemonConfig struct {
 	// Listen is reserved for future daemon cross-node TCP listener wiring.
 	// Current runtime does not consume this field yet.
 	Listen string `toml:"listen"`
+	// NoiseKeyFile is the path to the Noise Protocol static key file.
+	// If empty, encrypted TCP listener startup is refused.
+	NoiseKeyFile string `toml:"noise_key_file"`
+	// TrustedKeys lists trusted Noise server public keys in hex form.
+	TrustedKeys []string `toml:"trusted_keys"`
 }
 
 // ServiceSpec describes one managed service entry.

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/maxesisn/nexus/pkg/config"
 	"github.com/maxesisn/nexus/pkg/registry"
+	"github.com/maxesisn/nexus/pkg/transport"
 )
 
 // Daemon orchestrates managed services.
@@ -24,6 +26,7 @@ type Daemon struct {
 	health   *HealthMonitor
 	registry *registry.Registry
 	control  *ControlServer
+	tcpNoise transport.Listener
 
 	mu      sync.Mutex
 	started bool
@@ -73,12 +76,30 @@ func (d *Daemon) Start(ctx context.Context) error {
 			d.resetStartState(cancel)
 			return fmt.Errorf("invalid daemon.listen address %q: %w", d.cfg.Daemon.Listen, err)
 		}
-		d.logger.Info("TCP control plane listener configured but Noise transport not yet initialized", "listen", d.cfg.Daemon.Listen)
+		if d.cfg.Daemon.NoiseKeyFile == "" {
+			d.logger.Warn("refusing daemon tcp listen without noise key file", "listen", d.cfg.Daemon.Listen)
+			d.resetStartState(cancel)
+			return errors.New("daemon.listen requires daemon.noise_key_file for encrypted tcp transport")
+		}
+		priv, pub, err := transport.LoadOrGenerateKey(d.cfg.Daemon.NoiseKeyFile)
+		if err != nil {
+			d.resetStartState(cancel)
+			return fmt.Errorf("load noise key: %w", err)
+		}
+		tcp := transport.NewNoiseTCPTransport(priv, pub, d.cfg.Daemon.TrustedKeys)
+		ln, err := tcp.Listen(runCtx, d.cfg.Daemon.Listen)
+		if err != nil {
+			d.resetStartState(cancel)
+			return fmt.Errorf("start noise tcp listener: %w", err)
+		}
+		d.tcpNoise = ln
+		d.logger.Info("Noise TCP listener started", "listen", ln.Addr(), "public_key", hex.EncodeToString(pub))
 	}
 
 	if d.cfg.Daemon.Socket != "" {
 		d.control = NewControlServer(d, d.registry, d.logger, time.Now())
 		if err := d.control.Start(d.cfg.Daemon.Socket); err != nil {
+			_ = d.shutdownNoiseTCP()
 			d.resetStartState(cancel)
 			return err
 		}
@@ -87,6 +108,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 	ordered, err := ResolveStartOrder(d.cfg.Services)
 	if err != nil {
 		_ = d.shutdownControl()
+		_ = d.shutdownNoiseTCP()
 		d.resetStartState(cancel)
 		return err
 	}
@@ -94,9 +116,10 @@ func (d *Daemon) Start(ctx context.Context) error {
 		if err := d.pm.StartService(runCtx, svc); err != nil {
 			stopErr := d.pm.StopAll()
 			controlErr := d.shutdownControl()
+			noiseErr := d.shutdownNoiseTCP()
 			cancel()
 			d.resetStartState(nil)
-			return fmt.Errorf("start service %s: %w", svc.Name, errors.Join(err, stopErr, controlErr))
+			return fmt.Errorf("start service %s: %w", svc.Name, errors.Join(err, stopErr, controlErr, noiseErr))
 		}
 	}
 
@@ -125,13 +148,14 @@ func (d *Daemon) Stop() error {
 		cancel()
 	}
 	d.wg.Wait()
+	noiseErr := d.shutdownNoiseTCP()
 	controlErr := d.shutdownControl()
 	stopErr := d.pm.StopAll()
 	var regErr error
 	if d.registry != nil {
 		d.registry.Close()
 	}
-	return errors.Join(controlErr, stopErr, regErr)
+	return errors.Join(noiseErr, controlErr, stopErr, regErr)
 }
 
 // RestartService restarts one configured service by name.
@@ -168,6 +192,17 @@ func (d *Daemon) shutdownControl() error {
 	d.mu.Unlock()
 	if control != nil {
 		return control.Close()
+	}
+	return nil
+}
+
+func (d *Daemon) shutdownNoiseTCP() error {
+	d.mu.Lock()
+	ln := d.tcpNoise
+	d.tcpNoise = nil
+	d.mu.Unlock()
+	if ln != nil {
+		return ln.Close()
 	}
 	return nil
 }
