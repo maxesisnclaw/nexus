@@ -151,7 +151,7 @@ func New(cfg Config) (*Client, error) {
 		cfg.CallRetries = 0
 	}
 	if cfg.MaxInboundConns <= 0 {
-		cfg.MaxInboundConns = 1024
+		cfg.MaxInboundConns = 128
 	}
 	if cfg.Network == "" {
 		cfg.Network = "uds"
@@ -569,7 +569,10 @@ func (c *Client) register(endpoints []registry.Endpoint) {
 		TTL:          15 * time.Second,
 		Endpoints:    append([]registry.Endpoint(nil), endpoints...),
 	}
-	c.registry.Register(inst)
+	if err := c.registry.Register(inst); err != nil {
+		c.logger.Error("failed to register service instance", "name", inst.Name, "id", inst.ID, "err", err)
+		return
+	}
 	c.mu.Lock()
 	c.registered = true
 	c.mu.Unlock()
@@ -736,7 +739,14 @@ func (c *Client) recvWithTimeout(conn transport.Conn) (*transport.Message, error
 	return msg, nil
 }
 
-func (c *Client) dispatch(req *Request) (*Response, error) {
+func (c *Client) dispatch(req *Request) (resp *Response, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.logger.Error("handler panic", "method", req.Method, "panic", r)
+			resp = nil
+			err = fmt.Errorf("handler panic: %v", r)
+		}
+	}()
 	c.mu.RLock()
 	handler, ok := c.handlers[req.Method]
 	c.mu.RUnlock()

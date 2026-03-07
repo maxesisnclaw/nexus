@@ -110,7 +110,7 @@ func TestCallRetrySucceedsAfterDialFailures(t *testing.T) {
 	reg := registry.New("node-a")
 	defer reg.Close()
 
-	reg.Register(registry.ServiceInstance{
+	_ = reg.Register(registry.ServiceInstance{
 		Name:      "echo",
 		ID:        "echo-1",
 		Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: "/tmp/does-not-matter.sock"}},
@@ -147,7 +147,7 @@ func TestCallRetryExhausted(t *testing.T) {
 	reg := registry.New("node-a")
 	defer reg.Close()
 
-	reg.Register(registry.ServiceInstance{
+	_ = reg.Register(registry.ServiceInstance{
 		Name:      "echo",
 		ID:        "echo-1",
 		Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: "/tmp/does-not-matter.sock"}},
@@ -176,7 +176,7 @@ func TestCallReusesConnectionAcrossCalls(t *testing.T) {
 	defer reg.Close()
 
 	const addr = "/tmp/echo-reuse.sock"
-	reg.Register(registry.ServiceInstance{
+	_ = reg.Register(registry.ServiceInstance{
 		Name:      "echo",
 		ID:        "echo-1",
 		Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: addr}},
@@ -223,7 +223,7 @@ func TestCallDiscardsBadConnectionAndRedials(t *testing.T) {
 	defer reg.Close()
 
 	const addr = "/tmp/echo-redial.sock"
-	reg.Register(registry.ServiceInstance{
+	_ = reg.Register(registry.ServiceInstance{
 		Name:      "echo",
 		ID:        "echo-1",
 		Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: addr}},
@@ -314,12 +314,12 @@ func TestCallWithDataFallbackDoesNotRepickInstance(t *testing.T) {
 	reg := registry.New("node-a")
 	defer reg.Close()
 
-	reg.Register(registry.ServiceInstance{
+	_ = reg.Register(registry.ServiceInstance{
 		Name:      "echo",
 		ID:        "echo-1",
 		Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: "/tmp/echo-1.sock"}},
 	})
-	reg.Register(registry.ServiceInstance{
+	_ = reg.Register(registry.ServiceInstance{
 		Name:      "echo",
 		ID:        "echo-2",
 		Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: "/tmp/echo-2.sock"}},
@@ -399,7 +399,7 @@ func TestCallWithDataFallbackOnFDSetupAndAckFailures(t *testing.T) {
 			defer reg.Close()
 
 			const addr = "/tmp/echo-fd-fallback.sock"
-			reg.Register(registry.ServiceInstance{
+			_ = reg.Register(registry.ServiceInstance{
 				Name:      "echo",
 				ID:        "echo-1",
 				Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: addr}},
@@ -453,7 +453,7 @@ func TestCallWithDataFallbackAcquireFailure(t *testing.T) {
 	defer reg.Close()
 
 	const addr = "/tmp/echo-fd-fallback-acquire.sock"
-	reg.Register(registry.ServiceInstance{
+	_ = reg.Register(registry.ServiceInstance{
 		Name:      "echo",
 		ID:        "echo-1",
 		Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: addr}},
@@ -540,7 +540,7 @@ func TestCallWithDataFDResponseBranches(t *testing.T) {
 			defer reg.Close()
 
 			const addr = "/tmp/echo-fd-response.sock"
-			reg.Register(registry.ServiceInstance{
+			_ = reg.Register(registry.ServiceInstance{
 				Name:      "echo",
 				ID:        "echo-1",
 				Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: addr}},
@@ -775,7 +775,7 @@ func TestCloseCleansConnectionPoolResources(t *testing.T) {
 	defer reg.Close()
 
 	const addr = "/tmp/echo-close-pool.sock"
-	reg.Register(registry.ServiceInstance{
+	_ = reg.Register(registry.ServiceInstance{
 		Name:      "echo",
 		ID:        "echo-1",
 		Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: addr}},
@@ -826,7 +826,7 @@ func TestCloseClosesOwnedRegistry(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	reg.Register(registry.ServiceInstance{
+	_ = reg.Register(registry.ServiceInstance{
 		Name: "svc-owned",
 		ID:   "owned-ephemeral",
 		TTL:  20 * time.Millisecond,
@@ -853,7 +853,7 @@ func TestCloseDoesNotCloseExternalRegistry(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	reg.Register(registry.ServiceInstance{
+	_ = reg.Register(registry.ServiceInstance{
 		Name: "svc-external",
 		ID:   "external-ephemeral",
 		TTL:  30 * time.Millisecond,

@@ -2,14 +2,16 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"sync"
 	"time"
 )
 
 const (
-	defaultTTL    = 15 * time.Second
-	defaultReaper = 1 * time.Second
+	defaultTTL           = 15 * time.Second
+	defaultReaper        = 1 * time.Second
+	maxSnapshotClockSkew = 30 * time.Second
 )
 
 // Registry stores service instances and supports discovery.
@@ -77,7 +79,13 @@ func (r *Registry) Close() {
 }
 
 // Register creates or updates an instance entry.
-func (r *Registry) Register(inst ServiceInstance) {
+func (r *Registry) Register(inst ServiceInstance) error {
+	if inst.ID == "" {
+		return errors.New("register: instance ID must not be empty")
+	}
+	if inst.Name == "" {
+		return errors.New("register: instance Name must not be empty")
+	}
 	if inst.TTL <= 0 {
 		inst.TTL = defaultTTL
 	}
@@ -92,6 +100,7 @@ func (r *Registry) Register(inst ServiceInstance) {
 	r.mu.Unlock()
 
 	r.notify(stored.Name, ChangeEvent{Type: ChangeUp, Instance: stored})
+	return nil
 }
 
 // Unregister removes an instance.
@@ -165,12 +174,19 @@ func (r *Registry) Snapshot() []ServiceInstance {
 
 // MergeSnapshot applies peer instances using last-write-wins by UpdatedAt.
 func (r *Registry) MergeSnapshot(instances []ServiceInstance) {
+	now := time.Now().UTC()
 	changes := make([]ChangeEvent, 0)
 	r.mu.Lock()
 	for _, incoming := range instances {
+		if incoming.ID == "" || incoming.Name == "" {
+			continue
+		}
 		incomingCopy := deepCopyInstance(incoming)
 		current, ok := r.services[incomingCopy.ID]
 		if !ok || incomingCopy.UpdatedAt.After(current.UpdatedAt) {
+			if incomingCopy.UpdatedAt.After(now.Add(maxSnapshotClockSkew)) {
+				incomingCopy.UpdatedAt = now
+			}
 			r.services[incomingCopy.ID] = incomingCopy
 			changes = append(changes, ChangeEvent{Type: ChangeUp, Instance: incomingCopy})
 		}

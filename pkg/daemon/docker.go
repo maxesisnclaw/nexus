@@ -63,7 +63,7 @@ func (d *dockerCLI) Stop(container string, grace time.Duration) error {
 	stopArgs := []string{"stop", "--time", strconv.Itoa(seconds), container}
 	stopCmd := execCommandContext(ctx, "docker", stopArgs...)
 	if out, err := stopCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("docker stop failed: %w (%s)", err, bytes.TrimSpace(out))
+		d.logger.Warn("docker stop returned error", "container", container, "err", err, "output", string(bytes.TrimSpace(out)))
 	}
 
 	// Cleanup is best-effort because stopped containers might already be auto-removed.

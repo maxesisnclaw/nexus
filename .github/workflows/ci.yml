@@ -54,7 +54,9 @@ jobs:
         run: docker run --rm -v ${{ github.workspace }}:/workspace -w /workspace nexus-test go test -v -race ./...
 
       - name: Run Linux integration tests in container
+        # SYS_PTRACE is required by the race detector. NET_ADMIN is required for UDS setup in this unprivileged container.
         run: docker run --rm --cap-add SYS_PTRACE --cap-add NET_ADMIN -v ${{ github.workspace }}:/workspace -w /workspace nexus-test go test -v -tags integration ./...
 
       - name: Run Linux integration race tests in container
+        # SYS_PTRACE is required by the race detector. NET_ADMIN is required for UDS setup in this unprivileged container.
         run: docker run --rm --cap-add SYS_PTRACE --cap-add NET_ADMIN -v ${{ github.workspace }}:/workspace -w /workspace nexus-test go test -v -race -tags integration ./...

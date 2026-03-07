@@ -12,13 +12,13 @@ func TestRegisterLookupAndCapability(t *testing.T) {
 	r := NewWithOptions("node-a", 200*time.Millisecond, 20*time.Millisecond)
 	defer r.Close()
 
-	r.Register(ServiceInstance{
+	_ = r.Register(ServiceInstance{
 		Name:         "detector",
 		ID:           "detector-vehicle",
 		Capabilities: []string{"detect-vehicle"},
 		Endpoints:    []Endpoint{{Type: EndpointUDS, Addr: "/run/nexus/svc/detector.sock"}},
 	})
-	r.Register(ServiceInstance{
+	_ = r.Register(ServiceInstance{
 		Name:         "detector",
 		ID:           "detector-person",
 		Capabilities: []string{"detect-person"},
@@ -39,7 +39,7 @@ func TestHeartbeatPreventsExpiry(t *testing.T) {
 	r := NewWithOptions("node-a", 100*time.Millisecond, 10*time.Millisecond)
 	defer r.Close()
 
-	r.Register(ServiceInstance{Name: "svc", ID: "svc-1"})
+	_ = r.Register(ServiceInstance{Name: "svc", ID: "svc-1"})
 	time.Sleep(60 * time.Millisecond)
 	if ok := r.Heartbeat("svc-1"); !ok {
 		t.Fatal("expected heartbeat success")
@@ -60,7 +60,7 @@ func TestExpiryAndWatch(t *testing.T) {
 	})
 	defer unsubscribe()
 
-	r.Register(ServiceInstance{Name: "svc", ID: "svc-1", TTL: 40 * time.Millisecond})
+	_ = r.Register(ServiceInstance{Name: "svc", ID: "svc-1", TTL: 40 * time.Millisecond})
 
 	up := <-events
 	if up.Type != ChangeUp {
@@ -103,8 +103,8 @@ func TestDiscoveryPickRoundRobin(t *testing.T) {
 	r := NewWithOptions("node-a", 1*time.Second, 200*time.Millisecond)
 	defer r.Close()
 
-	r.Register(ServiceInstance{Name: "svc", ID: "a"})
-	r.Register(ServiceInstance{Name: "svc", ID: "b"})
+	_ = r.Register(ServiceInstance{Name: "svc", ID: "a"})
+	_ = r.Register(ServiceInstance{Name: "svc", ID: "b"})
 
 	d := NewDiscovery(r)
 	first, err := d.Pick("svc")
@@ -126,10 +126,10 @@ func TestUnregisterAndUnsubscribe(t *testing.T) {
 
 	events := make(chan ChangeEvent, 4)
 	unsub := r.Watch("svc", func(ev ChangeEvent) { events <- ev })
-	r.Register(ServiceInstance{Name: "svc", ID: "svc-1"})
+	_ = r.Register(ServiceInstance{Name: "svc", ID: "svc-1"})
 	r.Unregister("svc-1")
 	unsub()
-	r.Register(ServiceInstance{Name: "svc", ID: "svc-2"})
+	_ = r.Register(ServiceInstance{Name: "svc", ID: "svc-2"})
 
 	got := make([]ChangeEvent, 0, 2)
 	for i := 0; i < 2; i++ {
@@ -174,7 +174,7 @@ func TestWatchPanicDoesNotBreakDelivery(t *testing.T) {
 		events <- ev
 	})
 
-	r.Register(ServiceInstance{Name: "svc", ID: "svc-1"})
+	_ = r.Register(ServiceInstance{Name: "svc", ID: "svc-1"})
 
 	select {
 	case ev := <-events:
@@ -203,7 +203,7 @@ func TestWatchBlockedCallbackDoesNotBlockOthers(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		r.Register(ServiceInstance{Name: "svc", ID: "svc-1"})
+		_ = r.Register(ServiceInstance{Name: "svc", ID: "svc-1"})
 		close(done)
 	}()
 
@@ -237,7 +237,7 @@ func TestWatchSlowCallbackBoundedGoroutines(t *testing.T) {
 		<-block
 	})
 
-	r.Register(ServiceInstance{Name: "svc", ID: "svc-0"})
+	_ = r.Register(ServiceInstance{Name: "svc", ID: "svc-0"})
 	select {
 	case <-started:
 	case <-time.After(time.Second):
@@ -246,7 +246,7 @@ func TestWatchSlowCallbackBoundedGoroutines(t *testing.T) {
 
 	baseline := runtime.NumGoroutine()
 	for i := 1; i <= 256; i++ {
-		r.Register(ServiceInstance{Name: "svc", ID: fmt.Sprintf("svc-%d", i)})
+		_ = r.Register(ServiceInstance{Name: "svc", ID: fmt.Sprintf("svc-%d", i)})
 	}
 
 	time.Sleep(100 * time.Millisecond)
@@ -271,16 +271,16 @@ func TestWatchUnsubscribeStopsQueuedDelivery(t *testing.T) {
 		events <- ev
 	})
 
-	r.Register(ServiceInstance{Name: "svc", ID: "svc-1"})
+	_ = r.Register(ServiceInstance{Name: "svc", ID: "svc-1"})
 	select {
 	case <-started:
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for watcher callback start")
 	}
 
-	r.Register(ServiceInstance{Name: "svc", ID: "svc-2"})
+	_ = r.Register(ServiceInstance{Name: "svc", ID: "svc-2"})
 	unsub()
-	r.Register(ServiceInstance{Name: "svc", ID: "svc-3"})
+	_ = r.Register(ServiceInstance{Name: "svc", ID: "svc-3"})
 	close(block)
 
 	received := make([]ChangeEvent, 0, 2)
@@ -325,8 +325,8 @@ func TestSnapshotSorted(t *testing.T) {
 	r := NewWithOptions("node-a", time.Second, 100*time.Millisecond)
 	defer r.Close()
 
-	r.Register(ServiceInstance{Name: "svc", ID: "b"})
-	r.Register(ServiceInstance{Name: "svc", ID: "a"})
+	_ = r.Register(ServiceInstance{Name: "svc", ID: "b"})
+	_ = r.Register(ServiceInstance{Name: "svc", ID: "a"})
 	snapshot := r.Snapshot()
 	if len(snapshot) != 2 {
 		t.Fatalf("unexpected snapshot length: %d", len(snapshot))
