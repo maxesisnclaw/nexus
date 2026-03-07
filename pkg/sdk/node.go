@@ -26,6 +26,7 @@ const (
 )
 
 var createMemfd = transport.CreateMemfd
+var nodeHeartbeatInterval = 5 * time.Second
 
 type nodeState int
 
@@ -204,13 +205,16 @@ type Node struct {
 
 	localNodeID string
 
-	mu         sync.RWMutex
-	state      nodeState
-	listener   transport.Listener
-	heartbeat  chan struct{}
-	registered bool
-	closeOnce  sync.Once
-	closeErr   error
+	mu                  sync.RWMutex
+	state               nodeState
+	listener            transport.Listener
+	heartbeat           chan struct{}
+	registered          bool
+	registeredEndpoints []registry.Endpoint
+	closeOnce           sync.Once
+	closeErr            error
+
+	heartbeatFailures int
 
 	activeConns   map[transport.Conn]struct{}
 	activeConnsMu sync.Mutex
@@ -727,7 +731,9 @@ func (c *Node) Close() error {
 		if c.registered {
 			c.regAPI.Unregister(c.cfg.ID)
 			c.registered = false
+			c.registeredEndpoints = nil
 		}
+		c.heartbeatFailures = 0
 		close(c.heartbeat)
 		if c.listener != nil {
 			c.closeErr = c.listener.Close()
@@ -777,6 +783,7 @@ func (c *Node) register(ctx context.Context, endpoints []registry.Endpoint) erro
 		if err := c.regAPI.Register(inst); err == nil {
 			c.mu.Lock()
 			c.registered = true
+			c.registeredEndpoints = append([]registry.Endpoint(nil), endpoints...)
 			c.mu.Unlock()
 			return nil
 		} else {
@@ -805,14 +812,48 @@ func (c *Node) register(ctx context.Context, endpoints []registry.Endpoint) erro
 }
 
 func (c *Node) heartbeatLoop() {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(nodeHeartbeatInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-c.heartbeat:
 			return
 		case <-ticker.C:
-			_ = c.regAPI.Heartbeat(c.cfg.ID)
+			if c.regAPI.Heartbeat(c.cfg.ID) {
+				c.heartbeatFailures = 0
+				continue
+			}
+
+			c.heartbeatFailures++
+			if c.heartbeatFailures < 3 {
+				continue
+			}
+
+			c.mu.RLock()
+			endpoints := append([]registry.Endpoint(nil), c.registeredEndpoints...)
+			c.mu.RUnlock()
+			if len(endpoints) == 0 {
+				c.logger.Error(
+					"failed to re-register after heartbeat failure",
+					"id", c.cfg.ID,
+					"consecutive_failures", c.heartbeatFailures,
+					"err", "missing registered endpoints",
+				)
+				continue
+			}
+
+			if err := c.register(context.Background(), endpoints); err != nil {
+				c.logger.Error(
+					"failed to re-register after heartbeat failure",
+					"id", c.cfg.ID,
+					"consecutive_failures", c.heartbeatFailures,
+					"err", err,
+				)
+				continue
+			}
+
+			c.heartbeatFailures = 0
+			c.logger.Info("re-registered after heartbeat failure", "id", c.cfg.ID)
 		}
 	}
 }

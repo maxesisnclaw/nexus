@@ -19,6 +19,8 @@ const (
 	maxRegistryMessageSize    = 64 * 1024 * 1024
 )
 
+var registryClientIODeadline = 10 * time.Second
+
 type registryClient struct {
 	addr   string
 	nodeID string
@@ -232,6 +234,9 @@ func (c *registryClient) request(req registryRequest, resp any) error {
 		return err
 	}
 	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(registryClientIODeadline)); err != nil {
+		return fmt.Errorf("set registry request deadline: %w", err)
+	}
 	if err := writeRegistryMessage(conn, req); err != nil {
 		return err
 	}

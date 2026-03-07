@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 import time
 from typing import Any
 
@@ -197,6 +198,9 @@ def test_call_allows_non_loopback_tcp_with_override(monkeypatch: Any, registry_s
             return
 
     class _FakeConn:
+        def settimeout(self, _timeout: float) -> None:
+            return
+
         def close(self) -> None:
             return
 
@@ -205,9 +209,10 @@ def test_call_allows_non_loopback_tcp_with_override(monkeypatch: Any, registry_s
             self.got_addr = ""
             self.got_use_tcp = False
 
-        def get(self, addr: str, *, use_tcp: bool) -> _FakeConn:
+        def get(self, addr: str, *, use_tcp: bool, timeout: float | None = None) -> _FakeConn:
             self.got_addr = addr
             self.got_use_tcp = use_tcp
+            assert timeout is not None
             return _FakeConn()
 
         def put(self, _addr: str, _conn: _FakeConn, *, use_tcp: bool) -> None:
@@ -232,6 +237,80 @@ def test_call_allows_non_loopback_tcp_with_override(monkeypatch: Any, registry_s
         assert resp.payload == b"ok"
         assert pool.got_use_tcp is True
         assert pool.got_addr == "10.20.30.41:9001"
+    finally:
+        node.close()
+
+
+def test_call_timeout_retries_and_raises_descriptive_error(monkeypatch: Any, registry_socket_path: str) -> None:
+    class _RemoteRegistry:
+        def lookup(self, _: str) -> list[dict[str, object]]:
+            return [{"id": "echo-timeout-1", "node": "remote-node", "endpoints": [{"type": "uds", "addr": "/tmp/echo-timeout.sock"}]}]
+
+        def unregister(self, _: str) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    class _FakeConn:
+        def __init__(self) -> None:
+            self.timeout_values: list[float] = []
+            self.closed = False
+
+        def settimeout(self, timeout: float) -> None:
+            self.timeout_values.append(timeout)
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _RetryPool:
+        def __init__(self) -> None:
+            self.get_calls = 0
+            self.put_calls = 0
+            self.conns: list[_FakeConn] = []
+
+        def get(self, _addr: str, *, use_tcp: bool, timeout: float | None = None) -> _FakeConn:
+            assert use_tcp is False
+            assert timeout is not None
+            self.get_calls += 1
+            conn = _FakeConn()
+            conn.settimeout(timeout)
+            self.conns.append(conn)
+            return conn
+
+        def put(self, _addr: str, _conn: _FakeConn, *, use_tcp: bool) -> None:
+            assert use_tcp is False
+            self.put_calls += 1
+
+        def close_all(self) -> None:
+            return
+
+    node = Node(
+        name="caller",
+        id="caller-timeout",
+        registry_addr=registry_socket_path,
+        call_timeout=0.25,
+        call_retries=2,
+    )
+    pool = _RetryPool()
+    node._registry = _RemoteRegistry()  # type: ignore[assignment]
+    node._pool = pool  # type: ignore[assignment]
+
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(node_module.time, "sleep", lambda value: sleep_calls.append(value))
+    monkeypatch.setattr(node_module, "send_message", lambda _conn, _msg: None)
+    monkeypatch.setattr(node_module, "recv_message", lambda _conn: (_ for _ in ()).throw(socket.timeout("timed out")))
+    try:
+        with pytest.raises(
+            TimeoutError,
+            match=r"RPC call to echo\.echo timed out after 0.25s",
+        ):
+            node.call("echo", "echo", b"hello")
+        assert pool.get_calls == 3
+        assert pool.put_calls == 0
+        assert sleep_calls == [0.1, 0.2]
+        assert all(conn.closed for conn in pool.conns)
+        assert all(conn.timeout_values for conn in pool.conns)
     finally:
         node.close()
 

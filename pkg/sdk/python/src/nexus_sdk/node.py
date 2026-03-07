@@ -54,11 +54,17 @@ class Node:
         max_inbound_conns: int = 128,
         registry_addr: str | None = None,
         capabilities: list[str] | None = None,
+        call_timeout: float = 30.0,
+        call_retries: int = 2,
     ):
         if not name:
             raise ValueError("name is required")
         if max_inbound_conns <= 0:
             raise ValueError("max_inbound_conns must be > 0")
+        if call_timeout <= 0:
+            raise ValueError("call_timeout must be > 0")
+        if call_retries < 0:
+            raise ValueError("call_retries must be >= 0")
         self._name = name
         self._id = id or name
         self._uds_addr = uds_addr
@@ -68,6 +74,8 @@ class Node:
         self._registry = RegistryClient(registry_addr or DEFAULT_REGISTRY_ADDR)
         self._capabilities = list(capabilities or [])
         self._pool = ConnectionPool()
+        self._call_timeout = call_timeout
+        self._call_retries = call_retries
 
         self._handlers: dict[str, Callable[[Request], Response]] = {}
         self._handlers_lock = threading.Lock()
@@ -142,46 +150,62 @@ class Node:
                 f"Refusing non-loopback TCP call to {addr} without encryption. "
                 "Set allow_insecure_tcp=True to override."
             )
-        conn = self._pool.get(addr, use_tcp=use_tcp)
 
-        reusable = True
+        for attempt in range(self._call_retries + 1):
+            conn = self._pool.get(addr, use_tcp=use_tcp, timeout=self._call_timeout)
+            reusable = True
+            try:
+                conn.settimeout(self._call_timeout)
+                send_message(conn, {"method": method, "payload": payload, "headers": {}})
+                resp = recv_message(conn)
+
+                headers = resp.get("headers")
+                if not isinstance(headers, dict):
+                    headers = {}
+                error = headers.get("error")
+                if error:
+                    raise RuntimeError(str(error))
+                body = resp.get("payload", b"")
+                if not isinstance(body, (bytes, bytearray)):
+                    raise RuntimeError("invalid response payload")
+                return Response(payload=bytes(body), headers=headers)
+            except socket.timeout as exc:
+                reusable = False
+                timeout_error = TimeoutError(
+                    f"RPC call to {service}.{method} timed out after {self._call_timeout}s"
+                )
+                self._close_failed_conn(addr, conn)
+                if attempt >= self._call_retries:
+                    raise timeout_error from exc
+                time.sleep(0.1 * (attempt + 1))
+            except (ConnectionError, TimeoutError, OSError, EOFError, struct.error):
+                reusable = False
+                self._close_failed_conn(addr, conn)
+                if attempt >= self._call_retries:
+                    raise
+                time.sleep(0.1 * (attempt + 1))
+            except Exception as exc:
+                reusable = False
+                logger.warning(
+                    "unexpected RPC call failure service=%s method=%s: %s",
+                    service,
+                    method,
+                    exc,
+                )
+                self._close_failed_conn(addr, conn)
+                raise
+            finally:
+                if reusable:
+                    self._pool.put(addr, conn, use_tcp=use_tcp)
+
+        raise RuntimeError("unreachable")
+
+    @staticmethod
+    def _close_failed_conn(addr: str, conn: socket.socket) -> None:
         try:
-            send_message(conn, {"method": method, "payload": payload, "headers": {}})
-            resp = recv_message(conn)
-        except (OSError, EOFError, struct.error):
-            reusable = False
-            try:
-                conn.close()
-            except OSError as exc:
-                logger.debug("failed to close failed RPC connection %s: %s", addr, exc)
-            raise
-        except Exception as exc:
-            reusable = False
-            logger.warning(
-                "unexpected RPC call failure service=%s method=%s: %s",
-                service,
-                method,
-                exc,
-            )
-            try:
-                conn.close()
-            except OSError as close_exc:
-                logger.debug("failed to close failed RPC connection %s: %s", addr, close_exc)
-            raise
-        finally:
-            if reusable:
-                self._pool.put(addr, conn, use_tcp=use_tcp)
-
-        headers = resp.get("headers")
-        if not isinstance(headers, dict):
-            headers = {}
-        error = headers.get("error")
-        if error:
-            raise RuntimeError(str(error))
-        body = resp.get("payload", b"")
-        if not isinstance(body, (bytes, bytearray)):
-            raise RuntimeError("invalid response payload")
-        return Response(payload=bytes(body), headers=headers)
+            conn.close()
+        except OSError as exc:
+            logger.debug("failed to close failed RPC connection %s: %s", addr, exc)
 
     def close(self) -> None:
         """Stop serving and clean up."""

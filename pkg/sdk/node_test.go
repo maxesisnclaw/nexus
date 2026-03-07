@@ -1232,6 +1232,61 @@ func TestServeReturnsRegistrationErrorAfterRetries(t *testing.T) {
 	}
 }
 
+func TestHeartbeatLoopReregistersAfterConsecutiveFailures(t *testing.T) {
+	originalInterval := nodeHeartbeatInterval
+	nodeHeartbeatInterval = 5 * time.Millisecond
+	defer func() {
+		nodeHeartbeatInterval = originalInterval
+	}()
+
+	backend := &heartbeatRegistryBackend{
+		heartbeatResults: []bool{false, false, false, true},
+	}
+	node := &Node{
+		cfg: Config{
+			Name:            "svc-heartbeat",
+			ID:              "svc-heartbeat-1",
+			RegisterRetries: 1,
+			RetryBackoff:    time.Millisecond,
+		},
+		logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		regAPI:    backend,
+		heartbeat: make(chan struct{}),
+	}
+	endpoints := []registry.Endpoint{{Type: registry.EndpointUDS, Addr: "/tmp/svc-heartbeat.sock"}}
+	if err := node.register(context.Background(), endpoints); err != nil {
+		t.Fatalf("register() error = %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		node.heartbeatLoop()
+		close(done)
+	}()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got := backend.registerCalls.Load(); got >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := backend.registerCalls.Load(); got != 2 {
+		t.Fatalf("expected re-registration after heartbeat failures, got register calls=%d", got)
+	}
+
+	close(node.heartbeat)
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timeout waiting heartbeat loop to stop")
+	}
+
+	if got := node.heartbeatFailures; got != 0 {
+		t.Fatalf("expected heartbeat failure counter reset after re-registration, got %d", got)
+	}
+}
+
 func TestNoiseTrustedKeysRejectUntrustedRegistryKey(t *testing.T) {
 	reg := registry.New("node-a")
 	defer reg.Close()
@@ -1418,6 +1473,46 @@ func (b *failingRegistryBackend) NodeID() string {
 }
 
 func (b *failingRegistryBackend) Close() error {
+	return nil
+}
+
+type heartbeatRegistryBackend struct {
+	mu               sync.Mutex
+	heartbeatResults []bool
+	registerCalls    atomic.Int32
+}
+
+func (b *heartbeatRegistryBackend) Register(registry.ServiceInstance) error {
+	b.registerCalls.Add(1)
+	return nil
+}
+
+func (b *heartbeatRegistryBackend) Unregister(string) {}
+
+func (b *heartbeatRegistryBackend) Heartbeat(string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.heartbeatResults) == 0 {
+		return true
+	}
+	result := b.heartbeatResults[0]
+	b.heartbeatResults = b.heartbeatResults[1:]
+	return result
+}
+
+func (b *heartbeatRegistryBackend) Lookup(string) []registry.ServiceInstance {
+	return nil
+}
+
+func (b *heartbeatRegistryBackend) Watch(string, func(registry.ChangeEvent)) func() {
+	return func() {}
+}
+
+func (b *heartbeatRegistryBackend) NodeID() string {
+	return "node-test"
+}
+
+func (b *heartbeatRegistryBackend) Close() error {
 	return nil
 }
 

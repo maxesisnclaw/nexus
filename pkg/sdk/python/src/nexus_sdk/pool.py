@@ -17,7 +17,7 @@ class ConnectionPool:
         self._lock = threading.Lock()
         self._idle: dict[tuple[bool, str], list[socket.socket]] = defaultdict(list)
 
-    def get(self, addr: str, use_tcp: bool = False) -> socket.socket:
+    def get(self, addr: str, use_tcp: bool = False, timeout: float | None = None) -> socket.socket:
         """Get an active connection for ``addr``."""
         key = (use_tcp, addr)
         with self._lock:
@@ -25,8 +25,17 @@ class ConnectionPool:
             while bucket:
                 conn = bucket.pop()
                 if conn.fileno() != -1:
+                    if timeout is not None:
+                        try:
+                            conn.settimeout(timeout)
+                        except OSError:
+                            try:
+                                conn.close()
+                            except OSError:
+                                pass
+                            continue
                     return conn
-        return self._dial(addr, use_tcp=use_tcp)
+        return self._dial(addr, use_tcp=use_tcp, timeout=timeout)
 
     def put(self, addr: str, sock: socket.socket, use_tcp: bool = False) -> None:
         """Return a connection to the idle pool."""
@@ -55,10 +64,16 @@ class ConnectionPool:
                 pass
 
     @staticmethod
-    def _dial(addr: str, *, use_tcp: bool) -> socket.socket:
+    def _dial(addr: str, *, use_tcp: bool, timeout: float | None = None) -> socket.socket:
+        connect_timeout = timeout if timeout is not None else 2.0
         if use_tcp:
             host, port_text = addr.rsplit(":", 1)
-            return socket.create_connection((host, int(port_text)), timeout=2.0)
+            return socket.create_connection((host, int(port_text)), timeout=connect_timeout)
         conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        conn.connect(addr)
+        conn.settimeout(connect_timeout)
+        try:
+            conn.connect(addr)
+        except OSError:
+            conn.close()
+            raise
         return conn

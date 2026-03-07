@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -92,6 +93,51 @@ func TestServeAndCallViaRemoteRegistry(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for Serve() shutdown")
+	}
+}
+
+func TestRegistryClientRequestDeadline(t *testing.T) {
+	socket := filepath.Join("/tmp", fmt.Sprintf("nexus-sdk-registry-deadline-%d.sock", time.Now().UnixNano()))
+	t.Cleanup(func() { _ = os.Remove(socket) })
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer listener.Close()
+
+	accepted := make(chan struct{})
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		close(accepted)
+		defer conn.Close()
+		time.Sleep(200 * time.Millisecond)
+	}()
+
+	oldDeadline := registryClientIODeadline
+	registryClientIODeadline = 30 * time.Millisecond
+	defer func() {
+		registryClientIODeadline = oldDeadline
+	}()
+
+	client := newRegistryClient(socket, "node-a", slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	defer client.Close()
+
+	start := time.Now()
+	ok := client.Heartbeat("svc-1")
+	elapsed := time.Since(start)
+	if ok {
+		t.Fatal("expected heartbeat to fail when server does not reply")
+	}
+	select {
+	case <-accepted:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("server did not accept registry client connection")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("expected request to fail fast due to I/O deadline, elapsed=%s", elapsed)
 	}
 }
 
