@@ -219,6 +219,53 @@ func TestControlServerConcurrentClients(t *testing.T) {
 	}
 }
 
+func TestControlServerConnectionLimit(t *testing.T) {
+	d, cancel, cleanup := startTestDaemonWithSocket(t)
+	defer cleanup()
+	defer cancel()
+
+	held := make([]net.Conn, 0, maxControlConns)
+	defer func() {
+		for _, conn := range held {
+			_ = conn.Close()
+		}
+	}()
+
+	for i := 0; i < maxControlConns; i++ {
+		conn := dialControlSocket(t, d.cfg.Daemon.Socket)
+		if err := writeControlMessage(conn, controlRequest{Cmd: "watch", Name: fmt.Sprintf("svc-%d", i)}); err != nil {
+			_ = conn.Close()
+			t.Fatalf("write watch request %d: %v", i, err)
+		}
+		var ack okResponse
+		if err := readControlMessage(conn, &ack); err != nil {
+			_ = conn.Close()
+			t.Fatalf("read watch ack %d: %v", i, err)
+		}
+		if !ack.OK {
+			_ = conn.Close()
+			t.Fatalf("watch ack %d returned ok=false", i)
+		}
+		held = append(held, conn)
+	}
+
+	extraConn, err := net.Dial("unix", d.cfg.Daemon.Socket)
+	if err != nil {
+		t.Fatalf("dial extra control connection: %v", err)
+	}
+	defer extraConn.Close()
+
+	_ = extraConn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
+	writeErr := writeControlMessage(extraConn, controlRequest{Cmd: "health"})
+	_ = extraConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	var resp healthResponse
+	readErr := readControlMessage(extraConn, &resp)
+
+	if writeErr == nil && readErr == nil {
+		t.Fatalf("expected extra connection to be rejected when limit %d is reached", maxControlConns)
+	}
+}
+
 func startTestDaemonWithSocket(t *testing.T) (*Daemon, context.CancelFunc, func()) {
 	t.Helper()
 	socket := testControlSocketPath(t, "daemon")

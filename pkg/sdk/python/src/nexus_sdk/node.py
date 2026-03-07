@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import stat
@@ -16,6 +17,9 @@ from .transport import recv_message, send_message
 
 DEFAULT_REGISTRY_ADDR = "/run/nexus/registry.sock"
 _HEARTBEAT_INTERVAL_SECONDS = 5.0
+_TCP_IDLE_TIMEOUT_SECONDS = 300.0
+_TCP_LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost", "")
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -45,15 +49,20 @@ class Node:
         id: str | None = None,
         uds_addr: str | None = None,
         tcp_addr: str | None = None,
+        allow_insecure_tcp: bool = False,
+        max_inbound_conns: int = 128,
         registry_addr: str | None = None,
         capabilities: list[str] | None = None,
     ):
         if not name:
             raise ValueError("name is required")
+        if max_inbound_conns <= 0:
+            raise ValueError("max_inbound_conns must be > 0")
         self._name = name
         self._id = id or name
         self._uds_addr = uds_addr
         self._tcp_addr = tcp_addr
+        self._allow_insecure_tcp = allow_insecure_tcp
         self._registry = RegistryClient(registry_addr or DEFAULT_REGISTRY_ADDR)
         self._capabilities = list(capabilities or [])
         self._pool = ConnectionPool()
@@ -73,9 +82,13 @@ class Node:
         self._conn_threads: set[threading.Thread] = set()
         self._active_conns: set[socket.socket] = set()
         self._conn_lock = threading.Lock()
+        self._conn_sem = threading.Semaphore(max_inbound_conns)
 
         self._rr_lock = threading.Lock()
         self._rr_offsets: dict[str, int] = {}
+
+        if self._tcp_addr:
+            self._validate_tcp_listen_addr(self._tcp_addr)
 
     def handle(self, method: str, handler: Callable[[Request], Response]) -> None:
         """Register a handler for an RPC method."""
@@ -120,6 +133,12 @@ class Node:
 
         instance = self._pick_instance(service, instances)
         addr, use_tcp = self._pick_endpoint(instance)
+        if use_tcp and not self._is_loopback_tcp_addr(addr):
+            # TODO: implement Noise Protocol encryption for TCP (parity with Go SDK)
+            _LOGGER.warning(
+                "connecting to non-loopback TCP address %s without transport encryption",
+                addr,
+            )
         conn = self._pool.get(addr, use_tcp=use_tcp)
 
         reusable = True
@@ -222,7 +241,7 @@ class Node:
                 listeners.append(uds_listener)
                 endpoints.append({"type": "uds", "addr": self._uds_addr})
             if self._tcp_addr:
-                tcp_listener = self._create_tcp_listener(self._tcp_addr)
+                tcp_listener = self._start_tcp_listener(self._tcp_addr)
                 listeners.append(tcp_listener)
                 host, port = tcp_listener.getsockname()[:2]
                 endpoints.append({"type": "tcp", "addr": f"{host}:{port}"})
@@ -272,6 +291,28 @@ class Node:
                     return
                 return
 
+            acquired = False
+            while not self._stop.is_set():
+                acquired = self._conn_sem.acquire(timeout=1.0)
+                if acquired:
+                    break
+            if not acquired:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                continue
+
+            try:
+                conn.settimeout(_TCP_IDLE_TIMEOUT_SECONDS)
+            except OSError:
+                self._conn_sem.release()
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                continue
+
             conn_thread = threading.Thread(target=self._serve_conn, args=(conn,), daemon=True)
             with self._conn_lock:
                 self._conn_threads.add(conn_thread)
@@ -285,6 +326,8 @@ class Node:
                 while not self._stop.is_set():
                     try:
                         req = recv_message(conn)
+                    except socket.timeout:
+                        return
                     except (EOFError, OSError, ValueError):
                         return
 
@@ -331,6 +374,7 @@ class Node:
                 self._active_conns.discard(conn)
                 current = threading.current_thread()
                 self._conn_threads.discard(current)
+            self._conn_sem.release()
 
     def _heartbeat_loop(self) -> None:
         while not self._stop.wait(_HEARTBEAT_INTERVAL_SECONDS):
@@ -381,12 +425,50 @@ class Node:
         listener.settimeout(1.0)
         return listener
 
+    def _start_tcp_listener(self, addr: str) -> socket.socket:
+        self._validate_tcp_listen_addr(addr)
+        return self._create_tcp_listener(addr)
+
+    @staticmethod
+    def _parse_tcp_addr(addr: str) -> tuple[str, int]:
+        if not addr:
+            raise ValueError("tcp listen address is required")
+        host, sep, port_text = addr.rpartition(":")
+        if not sep:
+            raise ValueError(f"invalid tcp listen address: {addr}")
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
+        try:
+            port = int(port_text)
+        except ValueError as exc:
+            raise ValueError(f"invalid tcp listen port: {addr}") from exc
+        return host, port
+
+    @classmethod
+    def _is_loopback_tcp_addr(cls, addr: str) -> bool:
+        try:
+            host, _ = cls._parse_tcp_addr(addr)
+        except ValueError:
+            host = addr.split(":")[0] if ":" in addr else addr
+        return host in _TCP_LOOPBACK_HOSTS
+
+    def _validate_tcp_listen_addr(self, addr: str) -> None:
+        if self._allow_insecure_tcp:
+            return
+        if self._is_loopback_tcp_addr(addr):
+            return
+        raise ValueError(
+            f"Refusing non-loopback TCP listen address {addr}. "
+            "Set allow_insecure_tcp=True to override."
+        )
+
     @staticmethod
     def _create_tcp_listener(addr: str) -> socket.socket:
-        host, port_text = addr.rsplit(":", 1)
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        host, port = Node._parse_tcp_addr(addr)
+        family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        listener = socket.socket(family, socket.SOCK_STREAM)
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind((host, int(port_text)))
+        listener.bind((host, port))
         listener.listen(128)
         listener.settimeout(1.0)
         return listener

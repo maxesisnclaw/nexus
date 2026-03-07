@@ -108,3 +108,17 @@ def test_call_to_nonexistent_handler_returns_error(
     finally:
         client.close()
         server.close()
+
+
+def test_node_rejects_non_loopback_tcp_without_override(registry_socket_path: str) -> None:
+    with pytest.raises(ValueError, match="Refusing non-loopback TCP listen address"):
+        Node(name="tcp", id="tcp-1", tcp_addr="0.0.0.0:0", registry_addr=registry_socket_path)
+
+
+def test_node_tcp_listener_enforces_loopback(registry_socket_path: str) -> None:
+    node = Node(name="tcp", id="tcp-2", tcp_addr="127.0.0.1:0", registry_addr=registry_socket_path)
+    listener = node._start_tcp_listener("127.0.0.1:0")
+    listener.close()
+
+    with pytest.raises(ValueError, match="Refusing non-loopback TCP listen address"):
+        node._start_tcp_listener("0.0.0.0:0")

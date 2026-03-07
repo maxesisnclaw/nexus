@@ -18,6 +18,8 @@ import (
 )
 
 const maxControlMessageSize = 64 * 1024 * 1024
+const maxControlConns = 64
+const controlReadTimeout = 5 * time.Minute
 
 type controlRequest struct {
 	Cmd          string              `msgpack:"cmd"`
@@ -69,6 +71,7 @@ type ControlServer struct {
 	registry  *registry.Registry
 	logger    *slog.Logger
 	startedAt time.Time
+	connSem   chan struct{}
 
 	mu         sync.Mutex
 	conns      map[net.Conn]struct{}
@@ -90,6 +93,7 @@ func NewControlServer(daemon *Daemon, reg *registry.Registry, logger *slog.Logge
 		registry:  reg,
 		logger:    logger,
 		startedAt: startedAt,
+		connSem:   make(chan struct{}, maxControlConns),
 		conns:     make(map[net.Conn]struct{}),
 	}
 }
@@ -152,7 +156,19 @@ func (s *ControlServer) acceptLoop() {
 			s.logger.Warn("control accept failed", "err", err)
 			continue
 		}
-		s.trackConn(conn)
+
+		select {
+		case s.connSem <- struct{}{}:
+		default:
+			s.logger.Warn("control connection limit reached", "max", maxControlConns)
+			_ = conn.Close()
+			continue
+		}
+
+		if !s.trackConn(conn) {
+			<-s.connSem
+			continue
+		}
 		s.wg.Add(1)
 		go s.serveConn(conn)
 	}
@@ -160,15 +176,22 @@ func (s *ControlServer) acceptLoop() {
 
 func (s *ControlServer) serveConn(conn net.Conn) {
 	defer s.wg.Done()
+	defer func() { <-s.connSem }()
 	session := &controlSession{server: s, conn: conn}
 	defer session.Close()
 
 	for {
+		if err := session.extendReadDeadline(); err != nil {
+			return
+		}
 		var req controlRequest
 		if err := readControlMessage(conn, &req); err != nil {
 			if !errors.Is(err, io.EOF) {
 				s.logger.Debug("control connection closed", "err", err)
 			}
+			return
+		}
+		if err := session.extendReadDeadline(); err != nil {
 			return
 		}
 		if err := session.handleRequest(req); err != nil {
@@ -219,14 +242,15 @@ func (s *ControlServer) Close() error {
 	return joined
 }
 
-func (s *ControlServer) trackConn(conn net.Conn) {
+func (s *ControlServer) trackConn(conn net.Conn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		_ = conn.Close()
-		return
+		return false
 	}
 	s.conns[conn] = struct{}{}
+	return true
 }
 
 func (s *ControlServer) untrackConn(conn net.Conn) {
@@ -329,6 +353,10 @@ func (c *controlSession) handleRequest(req controlRequest) error {
 		unsub := c.server.registry.Watch(req.Name, func(event registry.ChangeEvent) {
 			if err := c.send(watchEventResponse{Event: string(event.Type), Instance: event.Instance}); err != nil {
 				_ = c.conn.Close()
+				return
+			}
+			if err := c.extendReadDeadline(); err != nil {
+				_ = c.conn.Close()
 			}
 		})
 		c.watchMu.Lock()
@@ -344,6 +372,10 @@ func (c *controlSession) send(msg any) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	return writeControlMessage(c.conn, msg)
+}
+
+func (c *controlSession) extendReadDeadline() error {
+	return c.conn.SetReadDeadline(time.Now().Add(controlReadTimeout))
 }
 
 func cleanupControlSocketPath(path string) error {
