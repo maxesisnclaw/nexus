@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -126,10 +125,16 @@ func (m *ProcessManager) StartService(ctx context.Context, spec config.ServiceSp
 	startedIDs := make([]string, 0, len(instances))
 	for _, inst := range instances {
 		if err := m.startProcess(ctx, inst); err != nil {
+			var rollbackErr error
 			for i := len(startedIDs) - 1; i >= 0; i-- {
-				_ = m.StopProcess(startedIDs[i])
+				if stopErr := m.StopProcess(startedIDs[i]); stopErr != nil {
+					rollbackErr = errors.Join(rollbackErr, fmt.Errorf("rollback stop %s: %w", startedIDs[i], stopErr))
+				}
 			}
-			return err
+			if rollbackErr != nil {
+				m.logger.Warn("startup rollback incomplete", "err", rollbackErr)
+			}
+			return errors.Join(err, rollbackErr)
 		}
 		startedIDs = append(startedIDs, inst.ID)
 	}
@@ -227,7 +232,12 @@ func (m *ProcessManager) StopProcess(id string) error {
 		return nil
 	}
 
-	if err := proc.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+	pgid, err := syscall.Getpgid(proc.cmd.Process.Pid)
+	if err != nil {
+		pgid = proc.cmd.Process.Pid
+	}
+
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("signal SIGTERM %s: %w", id, err)
 	}
 	waitCh := proc.exited
@@ -244,7 +254,7 @@ func (m *ProcessManager) StopProcess(id string) error {
 	case <-timer.C:
 	}
 
-	if err := proc.cmd.Process.Signal(syscall.SIGKILL); err != nil && !errors.Is(err, os.ErrProcessDone) {
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("signal SIGKILL %s: %w", id, err)
 	}
 	select {
@@ -363,6 +373,7 @@ func (m *ProcessManager) startProcess(ctx context.Context, proc *ManagedProcess)
 	}
 
 	cmd := exec.Command(proc.Spec.Binary, proc.Args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdoutWriter := &prefixWriter{logger: m.logger, id: proc.ID, stream: "stdout"}
 	stderrWriter := &prefixWriter{logger: m.logger, id: proc.ID, stream: "stderr"}
 	cmd.Stdout = stdoutWriter
@@ -381,9 +392,17 @@ func (m *ProcessManager) startProcess(ctx context.Context, proc *ManagedProcess)
 	}
 	m.mu.Unlock()
 	if !ok || current != reservation {
-		_ = proc.cmd.Process.Signal(syscall.SIGTERM)
+		if pgid, err := syscall.Getpgid(proc.cmd.Process.Pid); err == nil {
+			_ = syscall.Kill(-pgid, syscall.SIGTERM)
+		} else {
+			_ = proc.cmd.Process.Signal(syscall.SIGTERM)
+		}
 		time.Sleep(100 * time.Millisecond)
-		_ = proc.cmd.Process.Signal(syscall.SIGKILL)
+		if pgid, err := syscall.Getpgid(proc.cmd.Process.Pid); err == nil {
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		} else {
+			_ = proc.cmd.Process.Signal(syscall.SIGKILL)
+		}
 		_ = cmd.Wait()
 		stdoutWriter.Flush()
 		stderrWriter.Flush()

@@ -395,7 +395,7 @@ func (c *Client) Serve(ctx context.Context) error {
 		conn transport.Conn
 		err  error
 	}
-	acceptCh := make(chan acceptResult)
+	acceptCh := make(chan acceptResult, len(listeners))
 	for _, ln := range listeners {
 		ln := ln
 		go func() {
