@@ -24,6 +24,23 @@ const (
 
 var createMemfd = transport.CreateMemfd
 
+type clientState int
+
+const (
+	clientNew clientState = iota
+	clientServing
+	clientClosed
+)
+
+// BusinessError wraps errors returned by the remote handler (not transport failures).
+type BusinessError struct {
+	Message string
+}
+
+func (e *BusinessError) Error() string {
+	return e.Message
+}
+
 // Config controls SDK client behavior.
 type Config struct {
 	// Name is the service name to register.
@@ -57,6 +74,10 @@ type Config struct {
 	Router *transport.Router
 	// Logger receives SDK logs.
 	Logger *slog.Logger
+	// AuthFunc is an optional hook called before dispatching each request.
+	// Return a non-nil error to reject the request.
+	// When nil, all requests are accepted (default: no auth).
+	AuthFunc func(req *Request) error
 }
 
 // Request represents an incoming method invocation.
@@ -94,6 +115,7 @@ type Client struct {
 	localNodeID string
 
 	mu         sync.RWMutex
+	state      clientState
 	listener   transport.Listener
 	heartbeat  chan struct{}
 	registered bool
@@ -201,6 +223,10 @@ func (c *Client) callWithRetry(serviceName, method string, payload []byte, prefe
 		if err == nil {
 			return resp, nil
 		}
+		var bizErr *BusinessError
+		if errors.As(err, &bizErr) {
+			return nil, err
+		}
 		lastErr = err
 		if attempt == c.cfg.CallRetries {
 			break
@@ -216,6 +242,10 @@ func (c *Client) callWithRetryCtx(ctx context.Context, serviceName, method strin
 		resp, err := c.callOnceCtx(ctx, serviceName, method, payload, preferFD)
 		if err == nil {
 			return resp, nil
+		}
+		var bizErr *BusinessError
+		if errors.As(err, &bizErr) {
+			return nil, err
 		}
 		lastErr = err
 		if attempt == c.cfg.CallRetries {
@@ -288,7 +318,7 @@ func (c *Client) callOnce(serviceName, method string, payload []byte, preferFD b
 		return nil, err
 	}
 	if msgErr, ok := resp.Headers["error"]; ok {
-		return nil, errors.New(msgErr)
+		return nil, &BusinessError{Message: msgErr}
 	}
 	return &Response{Payload: resp.Payload, Headers: resp.Headers}, nil
 }
@@ -351,7 +381,7 @@ func (c *Client) callOnceCtx(ctx context.Context, serviceName, method string, pa
 		return nil, err
 	}
 	if msgErr, ok := resp.Headers["error"]; ok {
-		return nil, errors.New(msgErr)
+		return nil, &BusinessError{Message: msgErr}
 	}
 	return &Response{Payload: resp.Payload, Headers: resp.Headers}, nil
 }
@@ -389,15 +419,32 @@ func (c *Client) callMsgpack(conn transport.Conn, method string, payload []byte)
 		return nil, false, err
 	}
 	if msgErr, ok := resp.Headers["error"]; ok {
-		return nil, true, errors.New(msgErr)
+		return nil, true, &BusinessError{Message: msgErr}
 	}
 	return &Response{Payload: resp.Payload, Headers: resp.Headers}, true, nil
 }
 
 // Serve starts serving requests from configured endpoint.
 func (c *Client) Serve(ctx context.Context) error {
+	c.mu.Lock()
+	state := c.state
+	if state != clientNew {
+		c.mu.Unlock()
+		if state == clientClosed {
+			return errors.New("client is closed")
+		}
+		return errors.New("client is already serving")
+	}
+	c.state = clientServing
+	c.mu.Unlock()
+
 	listeners, endpoints, err := c.listen(ctx)
 	if err != nil {
+		c.mu.Lock()
+		if c.state == clientServing {
+			c.state = clientNew
+		}
+		c.mu.Unlock()
 		return err
 	}
 	listener := &listenerGroup{listeners: listeners}
@@ -482,6 +529,7 @@ func (c *Client) Serve(ctx context.Context) error {
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		c.mu.Lock()
+		c.state = clientClosed
 		if c.registered {
 			c.registry.Unregister(c.cfg.ID)
 			c.registered = false
@@ -641,6 +689,16 @@ func (c *Client) serveConn(conn transport.Conn) {
 			}
 			req.Method = req.Headers["method"]
 			req.Payload = data
+		}
+
+		if c.cfg.AuthFunc != nil {
+			if err := c.cfg.AuthFunc(req); err != nil {
+				if err := conn.Send(&transport.Message{Headers: map[string]string{"error": err.Error()}}); err != nil {
+					c.logger.Debug("send failed", "err", err)
+					return
+				}
+				continue
+			}
 		}
 
 		resp, err := c.dispatch(req)
