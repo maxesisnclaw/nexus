@@ -39,7 +39,7 @@ func (t *UDSTransport) Listen(_ context.Context, addr string) (Listener, error) 
 	if addr == "" {
 		return nil, errors.New("missing uds listen address")
 	}
-	if err := os.MkdirAll(filepath.Dir(addr), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(addr), 0o700); err != nil {
 		return nil, fmt.Errorf("create uds dir: %w", err)
 	}
 	if err := cleanupSocketPath(addr); err != nil {
@@ -52,6 +52,10 @@ func (t *UDSTransport) Listen(_ context.Context, addr string) (Listener, error) 
 	ln, err := net.ListenUnix("unix", unixAddr)
 	if err != nil {
 		return nil, fmt.Errorf("uds listen %s: %w", addr, err)
+	}
+	if err := os.Chmod(addr, 0o600); err != nil {
+		ln.Close()
+		return nil, fmt.Errorf("chmod uds socket: %w", err)
 	}
 	return &udsListener{ln: ln, path: addr}, nil
 }

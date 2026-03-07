@@ -21,6 +21,8 @@ type Daemon struct {
 	mu      sync.Mutex
 	started bool
 	cancel  context.CancelFunc
+	done    chan struct{}
+	wg      sync.WaitGroup
 }
 
 // New creates a daemon instance.
@@ -39,6 +41,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	d.cancel = cancel
+	d.done = make(chan struct{})
 	d.started = true
 	d.mu.Unlock()
 
@@ -46,17 +49,23 @@ func (d *Daemon) Start(ctx context.Context) error {
 	// and simple; dependency-aware scheduling can be added later if needed.
 	for _, svc := range d.cfg.Services {
 		if err := d.pm.StartService(runCtx, svc); err != nil {
-			_ = d.pm.StopAll()
+			stopErr := d.pm.StopAll()
 			cancel()
 			d.mu.Lock()
 			d.started = false
 			d.cancel = nil
+			d.done = nil
 			d.mu.Unlock()
-			return fmt.Errorf("start service %s: %w", svc.Name, err)
+			return fmt.Errorf("start service %s: %w", svc.Name, errors.Join(err, stopErr))
 		}
 	}
 
-	go d.health.Run(runCtx)
+	d.wg.Add(1)
+	go func(done chan struct{}) {
+		defer d.wg.Done()
+		defer close(done)
+		d.health.Run(runCtx)
+	}(d.done)
 	return nil
 }
 
@@ -70,12 +79,14 @@ func (d *Daemon) Stop() error {
 	cancel := d.cancel
 	d.started = false
 	d.cancel = nil
+	d.done = nil
 	d.mu.Unlock()
 
-	stopErr := d.pm.StopAll()
 	if cancel != nil {
 		cancel()
 	}
+	d.wg.Wait()
+	stopErr := d.pm.StopAll()
 	return stopErr
 }
 
