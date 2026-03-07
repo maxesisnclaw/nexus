@@ -5,6 +5,57 @@ import (
 	"sync"
 )
 
+const watcherQueueSize = 64
+
+type watcher struct {
+	cb     func(ChangeEvent)
+	events chan ChangeEvent
+	mu     sync.Mutex
+	closed bool
+}
+
+func newWatcher(cb func(ChangeEvent)) *watcher {
+	w := &watcher{
+		cb:     cb,
+		events: make(chan ChangeEvent, watcherQueueSize),
+	}
+	go w.loop()
+	return w
+}
+
+func (w *watcher) loop() {
+	for event := range w.events {
+		func() {
+			defer func() {
+				_ = recover()
+			}()
+			w.cb(event)
+		}()
+	}
+}
+
+func (w *watcher) enqueue(event ChangeEvent) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return
+	}
+	select {
+	case w.events <- event:
+	default:
+	}
+}
+
+func (w *watcher) close() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return
+	}
+	w.closed = true
+	close(w.events)
+}
+
 // Discovery provides utility lookups built on top of registry.
 type Discovery struct {
 	registry *Registry
@@ -48,16 +99,20 @@ func (r *Registry) Watch(name string, cb func(ChangeEvent)) (unsubscribe func())
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.watchers[name] == nil {
-		r.watchers[name] = make(map[int]func(ChangeEvent))
+		r.watchers[name] = make(map[int]*watcher)
 	}
 	id := r.nextWID
 	r.nextWID++
-	r.watchers[name][id] = cb
+	w := newWatcher(cb)
+	r.watchers[name][id] = w
 	return func() {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		if m := r.watchers[name]; m != nil {
-			delete(m, id)
+			if watcher, ok := m[id]; ok {
+				watcher.close()
+				delete(m, id)
+			}
 			if len(m) == 0 {
 				delete(r.watchers, name)
 			}
@@ -67,18 +122,12 @@ func (r *Registry) Watch(name string, cb func(ChangeEvent)) (unsubscribe func())
 
 func (r *Registry) notify(name string, event ChangeEvent) {
 	r.mu.RLock()
-	callbacks := make([]func(ChangeEvent), 0, len(r.watchers[name]))
-	for _, cb := range r.watchers[name] {
-		callbacks = append(callbacks, cb)
+	watchers := make([]*watcher, 0, len(r.watchers[name]))
+	for _, w := range r.watchers[name] {
+		watchers = append(watchers, w)
 	}
 	r.mu.RUnlock()
-	for _, cb := range callbacks {
-		cb := cb
-		go func() {
-			defer func() {
-				_ = recover()
-			}()
-			cb(event)
-		}()
+	for _, w := range watchers {
+		w.enqueue(event)
 	}
 }

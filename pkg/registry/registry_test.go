@@ -1,6 +1,9 @@
 package registry
 
 import (
+	"fmt"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 )
@@ -217,6 +220,104 @@ func TestWatchBlockedCallbackDoesNotBlockOthers(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for unblocked watcher")
+	}
+}
+
+func TestWatchSlowCallbackBoundedGoroutines(t *testing.T) {
+	r := NewWithOptions("node-a", 200*time.Millisecond, 20*time.Millisecond)
+	defer r.Close()
+
+	block := make(chan struct{})
+	defer close(block)
+
+	started := make(chan struct{})
+	var once sync.Once
+	r.Watch("svc", func(ChangeEvent) {
+		once.Do(func() { close(started) })
+		<-block
+	})
+
+	r.Register(ServiceInstance{Name: "svc", ID: "svc-0"})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for blocked watcher to start")
+	}
+
+	baseline := runtime.NumGoroutine()
+	for i := 1; i <= 256; i++ {
+		r.Register(ServiceInstance{Name: "svc", ID: fmt.Sprintf("svc-%d", i)})
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	after := runtime.NumGoroutine()
+	if delta := after - baseline; delta > 16 {
+		t.Fatalf("too many goroutines for slow watcher: baseline=%d after=%d delta=%d", baseline, after, delta)
+	}
+}
+
+func TestWatchUnsubscribeStopsQueuedDelivery(t *testing.T) {
+	r := NewWithOptions("node-a", 200*time.Millisecond, 20*time.Millisecond)
+	defer r.Close()
+
+	block := make(chan struct{})
+	started := make(chan struct{})
+	events := make(chan ChangeEvent, 8)
+	var once sync.Once
+
+	unsub := r.Watch("svc", func(ev ChangeEvent) {
+		once.Do(func() { close(started) })
+		<-block
+		events <- ev
+	})
+
+	r.Register(ServiceInstance{Name: "svc", ID: "svc-1"})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for watcher callback start")
+	}
+
+	r.Register(ServiceInstance{Name: "svc", ID: "svc-2"})
+	unsub()
+	r.Register(ServiceInstance{Name: "svc", ID: "svc-3"})
+	close(block)
+
+	received := make([]ChangeEvent, 0, 2)
+	deadline := time.After(time.Second)
+collect:
+	for {
+		select {
+		case ev := <-events:
+			received = append(received, ev)
+			if len(received) == 2 {
+				break collect
+			}
+		case <-deadline:
+			break collect
+		}
+	}
+
+	if len(received) == 0 {
+		t.Fatal("expected in-flight watcher callback delivery")
+	}
+	if len(received) > 2 {
+		t.Fatalf("unexpected number of delivered events after unsubscribe: %d", len(received))
+	}
+
+	for _, ev := range received {
+		if ev.Instance.ID == "svc-3" {
+			t.Fatalf("unexpected event after unsubscribe: %+v", ev)
+		}
+		if ev.Instance.ID != "svc-1" && ev.Instance.ID != "svc-2" {
+			t.Fatalf("unexpected delivered event: %+v", ev)
+		}
+	}
+
+	select {
+	case ev := <-events:
+		t.Fatalf("unexpected extra event after unsubscribe: %+v", ev)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 

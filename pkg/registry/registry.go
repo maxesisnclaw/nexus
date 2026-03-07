@@ -18,7 +18,7 @@ type Registry struct {
 
 	mu       sync.RWMutex
 	services map[string]ServiceInstance
-	watchers map[string]map[int]func(ChangeEvent)
+	watchers map[string]map[int]*watcher
 	nextWID  int
 
 	reaperEvery time.Duration
@@ -43,7 +43,7 @@ func NewWithOptions(nodeID string, ttl time.Duration, reaperEvery time.Duration)
 	r := &Registry{
 		nodeID:      nodeID,
 		services:    make(map[string]ServiceInstance),
-		watchers:    make(map[string]map[int]func(ChangeEvent)),
+		watchers:    make(map[string]map[int]*watcher),
 		reaperEvery: reaperEvery,
 		ctx:         ctx,
 		cancel:      cancel,
@@ -60,6 +60,20 @@ func (r *Registry) NodeID() string {
 // Close stops internal loops.
 func (r *Registry) Close() {
 	r.cancel()
+
+	r.mu.Lock()
+	watchers := make([]*watcher, 0)
+	for _, byID := range r.watchers {
+		for _, w := range byID {
+			watchers = append(watchers, w)
+		}
+	}
+	r.watchers = make(map[string]map[int]*watcher)
+	r.mu.Unlock()
+
+	for _, w := range watchers {
+		w.close()
+	}
 }
 
 // Register creates or updates an instance entry.
