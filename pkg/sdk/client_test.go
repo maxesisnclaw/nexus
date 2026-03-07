@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -377,22 +378,38 @@ func TestServeValidation(t *testing.T) {
 }
 
 func TestEndpointFromInstanceErrors(t *testing.T) {
-	if _, err := endpointFromInstance(registry.ServiceInstance{Name: "svc", ID: "a"}); err == nil {
+	if _, err := endpointFromInstance(registry.ServiceInstance{Name: "svc", ID: "a"}, "node-a"); err == nil {
 		t.Fatal("expected endpointFromInstance() error without endpoints")
 	}
 	ep, err := endpointFromInstance(registry.ServiceInstance{
 		Name: "svc",
 		ID:   "a",
+		Node: "node-b",
 		Endpoints: []registry.Endpoint{
 			{Type: registry.EndpointTCP, Addr: "127.0.0.1:9000"},
 			{Type: registry.EndpointUDS, Addr: "/run/nexus/a.sock"},
 		},
-	})
+	}, "node-a")
 	if err != nil {
 		t.Fatalf("endpointFromInstance() error = %v", err)
 	}
-	if ep.UDSAddr == "" || ep.TCPAddr == "" || !ep.Local {
+	if ep.UDSAddr == "" || ep.TCPAddr == "" || ep.Local {
 		t.Fatalf("unexpected endpoint conversion: %+v", ep)
+	}
+
+	localEP, err := endpointFromInstance(registry.ServiceInstance{
+		Name: "svc",
+		ID:   "b",
+		Node: "node-a",
+		Endpoints: []registry.Endpoint{
+			{Type: registry.EndpointUDS, Addr: "/run/nexus/b.sock"},
+		},
+	}, "node-a")
+	if err != nil {
+		t.Fatalf("endpointFromInstance() local error = %v", err)
+	}
+	if !localEP.Local {
+		t.Fatalf("expected local endpoint, got %+v", localEP)
 	}
 }
 
@@ -636,13 +653,15 @@ func TestListenTCPAndDualRegister(t *testing.T) {
 	}
 	defer client.Close()
 
-	ln, ep, err := client.listen(context.Background())
+	listeners, endpoints, err := client.listen(context.Background())
 	if err != nil {
 		t.Fatalf("listen() error = %v", err)
 	}
-	_ = ln.Close()
-	if ep.Type != registry.EndpointTCP || ep.Addr == "" {
-		t.Fatalf("unexpected tcp endpoint: %+v", ep)
+	for _, ln := range listeners {
+		_ = ln.Close()
+	}
+	if len(endpoints) != 1 || endpoints[0].Type != registry.EndpointTCP || endpoints[0].Addr == "" {
+		t.Fatalf("unexpected tcp endpoint list: %+v", endpoints)
 	}
 
 	dual, err := New(Config{
@@ -657,7 +676,10 @@ func TestListenTCPAndDualRegister(t *testing.T) {
 		t.Fatalf("New(dual) error = %v", err)
 	}
 	defer dual.Close()
-	dual.register(registry.Endpoint{Type: registry.EndpointUDS, Addr: dual.cfg.UDSAddr})
+	dual.register([]registry.Endpoint{
+		{Type: registry.EndpointUDS, Addr: dual.cfg.UDSAddr},
+		{Type: registry.EndpointTCP, Addr: dual.cfg.TCPAddr},
+	})
 	items := reg.Lookup("svc")
 	if len(items) == 0 {
 		t.Fatal("expected registered dual endpoint service")
@@ -670,6 +692,100 @@ func TestListenTCPAndDualRegister(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected dual endpoint registration, got %+v", items)
+	}
+}
+
+func TestServeDualNetworkRegistersBoundTCPAndRoutesRemoteOverTCP(t *testing.T) {
+	regLocal := registry.New("node-a")
+	defer regLocal.Close()
+
+	udsPath := testSocketPath(t, "dual-serve")
+	server, err := New(Config{
+		Name:     "svc",
+		ID:       "svc-dual",
+		Registry: regLocal,
+		Network:  "dual",
+		UDSAddr:  udsPath,
+		TCPAddr:  "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("New(server) error = %v", err)
+	}
+	defer server.Close()
+	server.Handle("echo", func(req *Request) (*Response, error) {
+		return &Response{Payload: append(req.Payload, '!')}, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.Serve(ctx)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case err := <-serveErr:
+			if err != nil {
+				t.Fatalf("Serve() returned error: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for Serve() shutdown")
+		}
+	}()
+
+	waitForService(t, regLocal, "svc", 1)
+	items := regLocal.Lookup("svc")
+	if len(items) != 1 {
+		t.Fatalf("expected one local service instance, got %+v", items)
+	}
+
+	var registeredUDS string
+	var registeredTCP string
+	for _, ep := range items[0].Endpoints {
+		switch ep.Type {
+		case registry.EndpointUDS:
+			registeredUDS = ep.Addr
+		case registry.EndpointTCP:
+			registeredTCP = ep.Addr
+		}
+	}
+	if registeredUDS != udsPath {
+		t.Fatalf("unexpected registered UDS endpoint: %s", registeredUDS)
+	}
+	host, port, err := net.SplitHostPort(registeredTCP)
+	if err != nil || host == "" || port == "" || port == "0" {
+		t.Fatalf("expected bound tcp endpoint instead of wildcard, got %q (err=%v)", registeredTCP, err)
+	}
+
+	regRemote := registry.New("node-b")
+	defer regRemote.Close()
+	snapshot := regLocal.Snapshot()
+	if len(snapshot) != 1 {
+		t.Fatalf("unexpected snapshot size: %d", len(snapshot))
+	}
+	for i := range snapshot[0].Endpoints {
+		if snapshot[0].Endpoints[i].Type == registry.EndpointUDS {
+			snapshot[0].Endpoints[i].Addr = testSocketPath(t, "remote-unreachable")
+		}
+	}
+	regRemote.MergeSnapshot(snapshot)
+
+	remoteCaller, err := New(Config{
+		Name:     "caller",
+		ID:       "caller-remote",
+		Registry: regRemote,
+	})
+	if err != nil {
+		t.Fatalf("New(remote caller) error = %v", err)
+	}
+	defer remoteCaller.Close()
+
+	resp, err := remoteCaller.Call("svc", "echo", []byte("ok"))
+	if err != nil {
+		t.Fatalf("remote Call() error = %v", err)
+	}
+	if string(resp.Payload) != "ok!" {
+		t.Fatalf("unexpected response payload: %q", string(resp.Payload))
 	}
 }
 

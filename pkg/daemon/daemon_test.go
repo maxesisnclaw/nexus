@@ -3,9 +3,12 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -70,6 +73,61 @@ func TestDaemonStartStop(t *testing.T) {
 
 	if err := d.Stop(); err != nil {
 		t.Fatalf("Stop() error = %v", err)
+	}
+}
+
+func TestDaemonStopPreservesSIGTERMHandling(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	marker := filepath.Join(t.TempDir(), "sigterm.marker")
+	cfg := &config.Config{
+		Daemon: config.DaemonConfig{
+			HealthInterval: config.Duration{Duration: 100 * time.Millisecond},
+			ShutdownGrace:  config.Duration{Duration: 2 * time.Second},
+		},
+		Services: []config.ServiceSpec{{
+			Name:    "trapped",
+			Type:    "singleton",
+			Runtime: "binary",
+			Binary:  "/bin/sh",
+			Args: []string{
+				"-c",
+				fmt.Sprintf(`trap 'sleep 0.2; echo term > %q; exit 0' TERM; while true; do sleep 1; done`, marker),
+			},
+		}},
+	}
+
+	d := New(cfg, logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := d.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	running := false
+	for time.Now().Before(deadline) {
+		states := d.ProcessStates()
+		if len(states) == 1 && states[0].Running {
+			running = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !running {
+		t.Fatalf("expected managed process to be running, got states=%+v", d.ProcessStates())
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	if err := d.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("expected SIGTERM marker file to be written: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "term" {
+		t.Fatalf("unexpected marker content: %q", string(data))
 	}
 }
 

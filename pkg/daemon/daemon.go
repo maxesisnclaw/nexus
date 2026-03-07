@@ -72,10 +72,11 @@ func (d *Daemon) Stop() error {
 	d.cancel = nil
 	d.mu.Unlock()
 
+	stopErr := d.pm.StopAll()
 	if cancel != nil {
 		cancel()
 	}
-	return d.pm.StopAll()
+	return stopErr
 }
 
 // RestartService restarts one configured service by name.

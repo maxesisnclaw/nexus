@@ -52,6 +52,11 @@ func NewWithOptions(nodeID string, ttl time.Duration, reaperEvery time.Duration)
 	return r
 }
 
+// NodeID returns the local registry node identifier.
+func (r *Registry) NodeID() string {
+	return r.nodeID
+}
+
 // Close stops internal loops.
 func (r *Registry) Close() {
 	r.cancel()

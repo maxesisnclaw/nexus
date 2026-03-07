@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -88,6 +89,8 @@ type Client struct {
 
 	handlers map[string]Handler
 
+	localNodeID string
+
 	mu         sync.RWMutex
 	listener   transport.Listener
 	heartbeat  chan struct{}
@@ -136,15 +139,16 @@ func New(cfg Config) (*Client, error) {
 	}
 
 	return &Client{
-		cfg:       cfg,
-		logger:    logger,
-		registry:  cfg.Registry,
-		ownsReg:   ownsReg,
-		discovery: registry.NewDiscovery(cfg.Registry),
-		router:    cfg.Router,
-		connPool:  newConnectionPool(cfg.Router),
-		handlers:  make(map[string]Handler),
-		heartbeat: make(chan struct{}),
+		cfg:         cfg,
+		logger:      logger,
+		registry:    cfg.Registry,
+		ownsReg:     ownsReg,
+		discovery:   registry.NewDiscovery(cfg.Registry),
+		router:      cfg.Router,
+		connPool:    newConnectionPool(cfg.Router),
+		handlers:    make(map[string]Handler),
+		heartbeat:   make(chan struct{}),
+		localNodeID: cfg.Registry.NodeID(),
 	}, nil
 }
 
@@ -189,7 +193,7 @@ func (c *Client) callOnce(serviceName, method string, payload []byte, preferFD b
 	if err != nil {
 		return nil, err
 	}
-	endpoint, err := endpointFromInstance(inst)
+	endpoint, err := endpointFromInstance(inst, c.localNodeID)
 	if err != nil {
 		return nil, err
 	}
@@ -275,32 +279,64 @@ func (c *Client) callMsgpack(conn transport.Conn, method string, payload []byte)
 
 // Serve starts serving requests from configured endpoint.
 func (c *Client) Serve(ctx context.Context) error {
-	listener, endpoint, err := c.listen(ctx)
+	listeners, endpoints, err := c.listen(ctx)
 	if err != nil {
 		return err
 	}
+	listener := &listenerGroup{listeners: listeners}
 	c.mu.Lock()
 	c.listener = listener
 	c.mu.Unlock()
 
-	c.register(endpoint)
+	c.register(endpoints)
 	go c.heartbeatLoop()
 	go func() {
 		<-ctx.Done()
 		_ = c.Close()
 	}()
 
-	for {
-		conn, err := listener.Accept(ctx)
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return nil
-			default:
-				return err
+	type acceptResult struct {
+		conn transport.Conn
+		err  error
+	}
+	acceptCh := make(chan acceptResult)
+	for _, ln := range listeners {
+		ln := ln
+		go func() {
+			for {
+				conn, err := ln.Accept(ctx)
+				if err != nil {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+					select {
+					case acceptCh <- acceptResult{err: err}:
+					case <-ctx.Done():
+					}
+					return
+				}
+				select {
+				case acceptCh <- acceptResult{conn: conn}:
+				case <-ctx.Done():
+					_ = conn.Close()
+					return
+				}
 			}
+		}()
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case result := <-acceptCh:
+			if result.err != nil {
+				return result.err
+			}
+			go c.serveConn(result.conn)
 		}
-		go c.serveConn(conn)
 	}
 }
 
@@ -329,16 +365,13 @@ func (c *Client) Close() error {
 	return c.closeErr
 }
 
-func (c *Client) register(endpoint registry.Endpoint) {
+func (c *Client) register(endpoints []registry.Endpoint) {
 	inst := registry.ServiceInstance{
 		Name:         c.cfg.Name,
 		ID:           c.cfg.ID,
 		Capabilities: c.cfg.Capabilities,
 		TTL:          15 * time.Second,
-		Endpoints:    []registry.Endpoint{endpoint},
-	}
-	if c.cfg.Network == "dual" && c.cfg.TCPAddr != "" && c.cfg.UDSAddr != "" {
-		inst.Endpoints = []registry.Endpoint{{Type: registry.EndpointUDS, Addr: c.cfg.UDSAddr}, {Type: registry.EndpointTCP, Addr: c.cfg.TCPAddr}}
+		Endpoints:    append([]registry.Endpoint(nil), endpoints...),
 	}
 	c.registry.Register(inst)
 	c.mu.Lock()
@@ -359,22 +392,67 @@ func (c *Client) heartbeatLoop() {
 	}
 }
 
-func (c *Client) listen(ctx context.Context) (transport.Listener, registry.Endpoint, error) {
-	if c.cfg.UDSAddr != "" {
-		ln, err := transport.NewUDSTransport().Listen(ctx, c.cfg.UDSAddr)
-		if err != nil {
-			return nil, registry.Endpoint{}, err
-		}
-		return ln, registry.Endpoint{Type: registry.EndpointUDS, Addr: c.cfg.UDSAddr}, nil
+func (c *Client) listen(ctx context.Context) ([]transport.Listener, []registry.Endpoint, error) {
+	mode := strings.ToLower(c.cfg.Network)
+	if mode == "" {
+		mode = "uds"
 	}
-	if c.cfg.TCPAddr != "" {
-		ln, err := transport.NewTCPTransport().Listen(ctx, c.cfg.TCPAddr)
-		if err != nil {
-			return nil, registry.Endpoint{}, err
+
+	listeners := make([]transport.Listener, 0, 2)
+	endpoints := make([]registry.Endpoint, 0, 2)
+	closeListeners := func() {
+		for _, ln := range listeners {
+			_ = ln.Close()
 		}
-		return ln, registry.Endpoint{Type: registry.EndpointTCP, Addr: ln.Addr()}, nil
 	}
-	return nil, registry.Endpoint{}, errors.New("either uds_addr or tcp_addr is required")
+	addListener := func(t transport.Transport, endpointType registry.EndpointType, addr string) error {
+		ln, err := t.Listen(ctx, addr)
+		if err != nil {
+			return err
+		}
+		listeners = append(listeners, ln)
+		endpoints = append(endpoints, registry.Endpoint{Type: endpointType, Addr: ln.Addr()})
+		return nil
+	}
+
+	switch mode {
+	case "dual":
+		if c.cfg.UDSAddr == "" || c.cfg.TCPAddr == "" {
+			return nil, nil, errors.New("dual network requires both uds_addr and tcp_addr")
+		}
+		if err := addListener(transport.NewUDSTransport(), registry.EndpointUDS, c.cfg.UDSAddr); err != nil {
+			return nil, nil, err
+		}
+		if err := addListener(transport.NewTCPTransport(), registry.EndpointTCP, c.cfg.TCPAddr); err != nil {
+			closeListeners()
+			return nil, nil, err
+		}
+	case "tcp":
+		if c.cfg.TCPAddr == "" {
+			return nil, nil, errors.New("tcp network requires tcp_addr")
+		}
+		if err := addListener(transport.NewTCPTransport(), registry.EndpointTCP, c.cfg.TCPAddr); err != nil {
+			return nil, nil, err
+		}
+	case "uds":
+		if c.cfg.UDSAddr != "" {
+			if err := addListener(transport.NewUDSTransport(), registry.EndpointUDS, c.cfg.UDSAddr); err != nil {
+				return nil, nil, err
+			}
+			break
+		}
+		if c.cfg.TCPAddr != "" {
+			if err := addListener(transport.NewTCPTransport(), registry.EndpointTCP, c.cfg.TCPAddr); err != nil {
+				return nil, nil, err
+			}
+			break
+		}
+		return nil, nil, errors.New("either uds_addr or tcp_addr is required")
+	default:
+		return nil, nil, fmt.Errorf("unsupported network mode: %s", c.cfg.Network)
+	}
+
+	return listeners, endpoints, nil
 }
 
 func (c *Client) serveConn(conn transport.Conn) {
@@ -453,13 +531,13 @@ func (c *Client) dispatch(req *Request) (*Response, error) {
 	return handler(req)
 }
 
-func endpointFromInstance(inst registry.ServiceInstance) (transport.ServiceEndpoint, error) {
+func endpointFromInstance(inst registry.ServiceInstance, localNodeID string) (transport.ServiceEndpoint, error) {
 	endpoint := transport.ServiceEndpoint{Name: inst.Name}
+	endpoint.Local = localNodeID != "" && inst.Node == localNodeID
 	for _, ep := range inst.Endpoints {
 		switch ep.Type {
 		case registry.EndpointUDS:
 			endpoint.UDSAddr = ep.Addr
-			endpoint.Local = true
 		case registry.EndpointTCP:
 			endpoint.TCPAddr = ep.Addr
 		}
@@ -468,4 +546,27 @@ func endpointFromInstance(inst registry.ServiceInstance) (transport.ServiceEndpo
 		return transport.ServiceEndpoint{}, errors.New("instance has no endpoints")
 	}
 	return endpoint, nil
+}
+
+type listenerGroup struct {
+	listeners []transport.Listener
+}
+
+func (l *listenerGroup) Accept(context.Context) (transport.Conn, error) {
+	return nil, errors.New("listener group does not support direct accept")
+}
+
+func (l *listenerGroup) Close() error {
+	var joined error
+	for _, listener := range l.listeners {
+		joined = errors.Join(joined, listener.Close())
+	}
+	return joined
+}
+
+func (l *listenerGroup) Addr() string {
+	if len(l.listeners) == 0 {
+		return ""
+	}
+	return l.listeners[0].Addr()
 }

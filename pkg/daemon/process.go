@@ -333,7 +333,7 @@ func (m *ProcessManager) startProcess(ctx context.Context, proc *ManagedProcess)
 		return fmt.Errorf("service %s runtime %s not supported in process manager", proc.Service, proc.Spec.Runtime)
 	}
 
-	cmd := exec.CommandContext(ctx, proc.Spec.Binary, proc.Args...)
+	cmd := exec.Command(proc.Spec.Binary, proc.Args...)
 	stdoutWriter := &prefixWriter{logger: m.logger, id: proc.ID, stream: "stdout"}
 	stderrWriter := &prefixWriter{logger: m.logger, id: proc.ID, stream: "stderr"}
 	cmd.Stdout = stdoutWriter
