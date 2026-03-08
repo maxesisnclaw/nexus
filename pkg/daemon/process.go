@@ -228,6 +228,10 @@ func (m *ProcessManager) StopProcess(id string) error {
 	if proc.Spec.Runtime == "docker" {
 		if proc.containerName != "" {
 			if err := m.docker.Stop(proc.containerName, m.stopWait); err != nil {
+				if running, checkErr := m.docker.IsRunning(proc.containerName); checkErr == nil && !running {
+					m.deleteProcess(id)
+					return nil
+				}
 				return fmt.Errorf("stop docker %s: %w", id, err)
 			}
 		}

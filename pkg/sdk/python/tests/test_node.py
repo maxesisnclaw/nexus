@@ -116,6 +116,62 @@ def test_call_to_nonexistent_handler_returns_error(
         server.close()
 
 
+def test_start_serving_rolls_back_registry_registration_on_partial_startup(
+    monkeypatch: Any,
+    registry_socket_path: str,
+    socket_path_factory: Any,
+) -> None:
+    class _FakeRegistry:
+        def __init__(self) -> None:
+            self.register_calls = 0
+            self.unregister_ids: list[str] = []
+
+        def register(
+            self,
+            _name: str,
+            _id: str,
+            *,
+            endpoints: list[dict[str, str]],
+            capabilities: list[str],
+            ttl_ms: int,
+        ) -> None:
+            assert endpoints
+            assert isinstance(capabilities, list)
+            assert ttl_ms > 0
+            self.register_calls += 1
+
+        def unregister(self, service_id: str) -> None:
+            self.unregister_ids.append(service_id)
+
+        def close(self) -> None:
+            return
+
+    node = Node(
+        name="rollback",
+        id="rollback-1",
+        uds_addr=socket_path_factory("rollback.sock"),
+        registry_addr=registry_socket_path,
+    )
+    fake_registry = _FakeRegistry()
+    node._registry = fake_registry  # type: ignore[assignment]
+
+    def _fail_thread_start(self: object) -> None:
+        raise RuntimeError("forced thread start failure")
+
+    monkeypatch.setattr(node_module.threading.Thread, "start", _fail_thread_start)
+
+    try:
+        with pytest.raises(RuntimeError, match="forced thread start failure"):
+            node._start_serving()
+        assert fake_registry.register_calls == 1
+        assert fake_registry.unregister_ids == ["rollback-1"]
+        assert node._registered is False
+        with node._state_lock:
+            assert node._state == "new"
+    finally:
+        node.close()
+
+
 def test_node_rejects_non_loopback_tcp_without_override(registry_socket_path: str) -> None:
     with pytest.raises(ValueError, match="Refusing non-loopback TCP listen address"):
         Node(name="tcp", id="tcp-1", tcp_addr="0.0.0.0:0", registry_addr=registry_socket_path)

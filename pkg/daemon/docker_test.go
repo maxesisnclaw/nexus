@@ -126,6 +126,33 @@ func TestDockerCLIStopRoundsUpSubSecondGrace(t *testing.T) {
 	}
 }
 
+func TestDockerCLIStopMissingContainerIsSuccess(t *testing.T) {
+	recordPath := filepath.Join(t.TempDir(), "docker-args.log")
+	restore := stubExecCommandContext(recordPath, "")
+	defer restore()
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	cli := &dockerCLI{logger: logger}
+	if err := cli.Stop("nexus-missing", time.Second); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+
+	data, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	logOutput := string(data)
+	if !strings.Contains(logOutput, "stop --time 1 nexus-missing") {
+		t.Fatalf("missing docker stop invocation: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "rm -f nexus-missing") {
+		t.Fatalf("missing docker rm invocation: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "inspect -f {{.State.Running}} nexus-missing") {
+		t.Fatalf("missing docker inspect invocation: %s", logOutput)
+	}
+}
+
 func TestDockerRunArgsOrderAndFields(t *testing.T) {
 	proc := &ManagedProcess{
 		ID:      "svc-1",
@@ -260,6 +287,13 @@ func TestDockerHelperProcess(t *testing.T) {
 	}
 	fail := os.Getenv("NEXUS_DOCKER_FAIL")
 	statePath := os.Getenv("NEXUS_DOCKER_STATE")
+	if len(subArgs) > 0 && (subArgs[0] == "stop" || subArgs[0] == "rm" || subArgs[0] == "inspect") {
+		container := subArgs[len(subArgs)-1]
+		if strings.Contains(container, "missing") {
+			_, _ = fmt.Fprintf(os.Stderr, "Error response from daemon: No such container: %s\n", container)
+			os.Exit(1)
+		}
+	}
 	if len(subArgs) > 0 && subArgs[0] == fail {
 		_, _ = fmt.Fprint(os.Stderr, "forced helper failure")
 		os.Exit(7)

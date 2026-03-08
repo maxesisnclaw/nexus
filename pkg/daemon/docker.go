@@ -94,6 +94,7 @@ func (d *dockerCLI) Stop(container string, grace time.Duration) error {
 	stopArgs := []string{"stop", "--time", strconv.Itoa(seconds), container}
 	stopCmd := execCommandContext(ctx, "docker", stopArgs...)
 	stopOut, stopErr := stopCmd.CombinedOutput()
+	stopMissing := dockerContainerNotFound(stopOut)
 
 	// Best-effort remove regardless of stop result.
 	rmCmd := execCommandContext(ctx, "docker", "rm", "-f", container)
@@ -104,11 +105,13 @@ func (d *dockerCLI) Stop(container string, grace time.Duration) error {
 	if checkErr == nil && running {
 		return fmt.Errorf("docker stop %s: container still running after stop and rm -f", container)
 	}
-	if stopErr != nil && checkErr != nil {
+	if stopErr != nil && !stopMissing && checkErr != nil {
 		return fmt.Errorf("docker stop %s: stop failed and cannot verify state: %w", container, errors.Join(stopErr, checkErr))
 	}
 
-	if stopErr != nil {
+	if stopErr != nil && stopMissing {
+		d.logger.Info("docker container already absent", "container", container)
+	} else if stopErr != nil {
 		d.logger.Info("docker container stopped (was already exited)", "container", container)
 	} else {
 		d.logger.Info("docker container stopped", "container", container)
@@ -123,9 +126,17 @@ func (d *dockerCLI) IsRunning(container string) (bool, error) {
 	cmd := execCommandContext(ctx, "docker", "inspect", "-f", "{{.State.Running}}", container)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return false, fmt.Errorf("docker inspect failed: %w", err)
+		if dockerContainerNotFound(out) {
+			return false, nil
+		}
+		return false, fmt.Errorf("docker inspect failed: %w (%s)", err, bytes.TrimSpace(out))
 	}
 	return strings.TrimSpace(string(out)) == "true", nil
+}
+
+func dockerContainerNotFound(out []byte) bool {
+	text := strings.ToLower(string(out))
+	return strings.Contains(text, "no such container") || strings.Contains(text, "no such object")
 }
 
 func dockerContainerName(proc *ManagedProcess) string {

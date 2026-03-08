@@ -135,6 +135,9 @@ func writeAll(conn net.Conn, data []byte) error {
 		if err != nil {
 			return err
 		}
+		if n == 0 {
+			return io.ErrNoProgress
+		}
 		data = data[n:]
 	}
 	return nil

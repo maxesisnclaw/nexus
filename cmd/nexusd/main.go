@@ -213,6 +213,10 @@ func runKeygen(args []string) int {
 		fmt.Fprintf(stderr, "write private key failed: %v\n", err)
 		return 1
 	}
+	if err := os.Chmod(outputPath, 0o600); err != nil {
+		fmt.Fprintf(stderr, "set private key permissions failed: %v\n", err)
+		return 1
+	}
 
 	fmt.Fprintf(stdout, "public key: %s\n", hex.EncodeToString(pub))
 	fmt.Fprintf(stdout, "private key written to: %s\n", outputPath)

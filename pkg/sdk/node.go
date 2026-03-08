@@ -663,10 +663,6 @@ func (c *Node) Serve(ctx context.Context) error {
 		defer c.heartbeatWG.Done()
 		c.heartbeatLoop(hbCtx)
 	}()
-	go func() {
-		<-ctx.Done()
-		_ = c.Close()
-	}()
 
 	type acceptResult struct {
 		conn transport.Conn

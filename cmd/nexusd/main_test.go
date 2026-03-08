@@ -367,6 +367,29 @@ func TestRunKeygen(t *testing.T) {
 	}
 }
 
+func TestRunKeygenHardensExistingFilePermissions(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "nexus.key")
+	if err := os.WriteFile(outPath, []byte("insecure"), 0o644); err != nil {
+		t.Fatalf("seed insecure key file: %v", err)
+	}
+	if err := os.Chmod(outPath, 0o644); err != nil {
+		t.Fatalf("chmod insecure key file: %v", err)
+	}
+
+	code, _, errOut := runWithCapturedOutput(t, []string{"keygen", "-out", outPath})
+	if code != 0 {
+		t.Fatalf("run(keygen) code = %d, want 0 (stderr=%q)", code, errOut)
+	}
+
+	info, err := os.Stat(outPath)
+	if err != nil {
+		t.Fatalf("stat private key file: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("private key file mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
 func TestRunStatusNoDaemon(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "registry.sock")
 

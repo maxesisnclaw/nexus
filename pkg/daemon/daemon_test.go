@@ -678,6 +678,30 @@ func TestProcessManagerStopServiceAggregatesErrors(t *testing.T) {
 	}
 }
 
+func TestProcessManagerStopProcessDockerMissingContainerCleansState(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pm := NewProcessManager(logger, time.Second)
+	pm.docker = &fakeDockerRuntime{
+		running: map[string]bool{},
+		stopErrs: map[string]error{
+			"nexus-worker": errors.New("No such container: nexus-worker"),
+		},
+	}
+	pm.procs["worker"] = &ManagedProcess{
+		ID:            "worker",
+		Service:       "svc",
+		Spec:          config.ServiceSpec{Runtime: "docker"},
+		containerName: "nexus-worker",
+	}
+
+	if err := pm.StopProcess("worker"); err != nil {
+		t.Fatalf("StopProcess() error = %v", err)
+	}
+	if _, ok := pm.procs["worker"]; ok {
+		t.Fatal("expected stale docker process entry to be removed")
+	}
+}
+
 func TestProcessManagerRestartServiceDocker(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	pm := NewProcessManager(logger, time.Second)

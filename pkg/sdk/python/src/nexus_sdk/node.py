@@ -318,6 +318,15 @@ class Node:
                     listener.close()
                 except OSError as exc:
                     logger.debug("failed to close listener during startup rollback: %s", exc)
+            if self._registered:
+                try:
+                    self._registry.unregister(self._id)
+                except OSError as exc:
+                    logger.debug("unregister failed for %s during startup rollback: %s", self._id, exc)
+                except Exception as exc:
+                    logger.warning("unregister failed for %s during startup rollback: %s", self._id, exc)
+                self._registered = False
+            self._listeners = []
             with self._state_lock:
                 if self._state != "closed":
                     self._state = "new"

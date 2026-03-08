@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -682,6 +683,52 @@ func TestServeValidation(t *testing.T) {
 	err = client.Serve(context.Background())
 	if err == nil {
 		t.Fatal("expected Serve() error without listen address")
+	}
+}
+
+func TestServeCloseWithoutContextCancelDoesNotLeakGoroutines(t *testing.T) {
+	reg := registry.New("node-a")
+	defer reg.Close()
+
+	baseline := runtime.NumGoroutine()
+	const iterations = 10
+
+	for i := 0; i < iterations; i++ {
+		name := fmt.Sprintf("svc-leak-%d", i)
+		node, err := New(Config{
+			Name:     name,
+			ID:       name + "-1",
+			Registry: reg,
+			UDSAddr:  testSocketPath(t, name),
+		})
+		if err != nil {
+			t.Fatalf("New() error = %v", err)
+		}
+
+		serveErr := make(chan error, 1)
+		go func() {
+			serveErr <- node.Serve(context.Background())
+		}()
+
+		waitForService(t, reg, name, 1)
+		if err := node.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		select {
+		case err := <-serveErr:
+			if err != nil {
+				t.Fatalf("Serve() error = %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for Serve() exit")
+		}
+	}
+
+	runtime.GC()
+	time.Sleep(100 * time.Millisecond)
+	after := runtime.NumGoroutine()
+	if after > baseline+4 {
+		t.Fatalf("possible goroutine leak: baseline=%d after=%d", baseline, after)
 	}
 }
 
