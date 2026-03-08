@@ -498,7 +498,18 @@ class Node:
             if tcp_addr:
                 return tcp_addr, True
             if uds_addr:
-                return uds_addr, False
+                instance_id = instance.get("id", "")
+                if isinstance(instance_id, bytes):
+                    try:
+                        instance_id = instance_id.decode()
+                    except UnicodeDecodeError:
+                        instance_id = ""
+                if not isinstance(instance_id, str):
+                    instance_id = ""
+                raise ConnectionError(
+                    f"instance {instance_id} has unknown node identity and no TCP endpoint; "
+                    "refusing UDS fallback for non-local target"
+                )
         raise RuntimeError("instance has no usable endpoints")
 
     @staticmethod

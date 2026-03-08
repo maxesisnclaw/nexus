@@ -352,6 +352,10 @@ def test_pick_endpoint_prefers_local_uds_and_remote_tcp(registry_socket_path: st
             "node": "remote-node",
             "endpoints": [{"type": "uds", "addr": "/tmp/remote-only.sock"}],
         }
+        unknown_only_uds_instance = {
+            "id": "unknown-only-1",
+            "endpoints": [{"type": "uds", "addr": "/tmp/unknown-only.sock"}],
+        }
 
         local_addr, local_use_tcp = node._pick_endpoint(local_instance)
         remote_addr, remote_use_tcp = node._pick_endpoint(remote_instance)
@@ -363,6 +367,14 @@ def test_pick_endpoint_prefers_local_uds_and_remote_tcp(registry_socket_path: st
             ),
         ):
             node._pick_endpoint(remote_only_uds_instance)
+        with pytest.raises(
+            ConnectionError,
+            match=(
+                "instance unknown-only-1 has unknown node identity and no TCP endpoint; "
+                "refusing UDS fallback for non-local target"
+            ),
+        ):
+            node._pick_endpoint(unknown_only_uds_instance)
 
         assert local_addr == "/tmp/local.sock"
         assert local_use_tcp is False
