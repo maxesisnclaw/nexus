@@ -68,6 +68,8 @@ class ConnectionPool:
         connect_timeout = timeout if timeout is not None else 2.0
         if use_tcp:
             host, port_text = addr.rsplit(":", 1)
+            if host.startswith("[") and host.endswith("]"):
+                host = host[1:-1]
             return socket.create_connection((host, int(port_text)), timeout=connect_timeout)
         conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         conn.settimeout(connect_timeout)

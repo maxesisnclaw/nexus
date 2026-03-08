@@ -3,10 +3,12 @@ package transport
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -39,6 +41,28 @@ func TestGenerateAndLoadNoiseKey(t *testing.T) {
 	}
 	if !bytes.Equal(loadedPrivAgain, loadedPriv) || !bytes.Equal(loadedPubAgain, loadedPub) {
 		t.Fatal("expected same keypair on repeated load")
+	}
+}
+
+func TestLoadOrGenerateKeyRejectsInsecurePermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "noise.key")
+	priv, _ := GenerateKeypair()
+	if len(priv) != noisePrivateKeySize {
+		t.Fatalf("unexpected private key length: %d", len(priv))
+	}
+	if err := os.WriteFile(path, []byte(hex.EncodeToString(priv)), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+
+	_, _, err := LoadOrGenerateKey(path)
+	if err == nil {
+		t.Fatal("expected insecure key file permissions to be rejected")
+	}
+	if !strings.Contains(err.Error(), "insecure permissions") {
+		t.Fatalf("expected insecure permission error, got %v", err)
 	}
 }
 

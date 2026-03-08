@@ -99,3 +99,23 @@ def test_pool_max_idle_limit(socket_path_factory: Any) -> None:
                 conn.close()
             except OSError:
                 pass
+
+
+def test_pool_tcp_dial_normalizes_bracketed_ipv6(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    class _DummyConn:
+        def close(self) -> None:
+            return None
+
+    def fake_create_connection(address: tuple[str, int], timeout: float | None = None) -> _DummyConn:
+        captured["address"] = address
+        captured["timeout"] = timeout
+        return _DummyConn()
+
+    monkeypatch.setattr(socket, "create_connection", fake_create_connection)
+
+    conn = ConnectionPool._dial("[::1]:1234", use_tcp=True, timeout=1.5)
+    assert captured["address"] == ("::1", 1234)
+    assert captured["timeout"] == 1.5
+    conn.close()

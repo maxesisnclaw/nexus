@@ -57,6 +57,17 @@ func LoadOrGenerateKey(path string) (priv, pub []byte, err error) {
 	}
 	data, readErr := os.ReadFile(path)
 	if readErr == nil {
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			return nil, nil, fmt.Errorf("stat noise key file %s: %w", path, statErr)
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			return nil, nil, fmt.Errorf(
+				"noise key file %s has insecure permissions %o: group/other permissions must be unset",
+				path,
+				info.Mode().Perm(),
+			)
+		}
 		raw := strings.TrimSpace(string(data))
 		decoded, decodeErr := hex.DecodeString(raw)
 		if decodeErr != nil {
