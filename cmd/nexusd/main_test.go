@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/maxesisn/nexus/pkg/config"
 )
@@ -430,6 +431,66 @@ func TestRunStatusSuccess(t *testing.T) {
 	}
 	if !strings.Contains(out, "worker-2") || !strings.Contains(out, "stopped") {
 		t.Fatalf("status output missing stopped row: %q", out)
+	}
+}
+
+func TestRunStatusReadTimeout(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "registry.sock")
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	defer ln.Close()
+
+	prevDialTimeout := statusDialTimeout
+	prevWriteTimeout := statusWriteTimeout
+	prevReadTimeout := statusReadTimeout
+	statusDialTimeout = 100 * time.Millisecond
+	statusWriteTimeout = 50 * time.Millisecond
+	statusReadTimeout = 30 * time.Millisecond
+	t.Cleanup(func() {
+		statusDialTimeout = prevDialTimeout
+		statusWriteTimeout = prevWriteTimeout
+		statusReadTimeout = prevReadTimeout
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		defer conn.Close()
+		var req statusRequest
+		if err := readControlMessage(conn, &req); err != nil {
+			done <- err
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+		done <- nil
+	}()
+
+	start := time.Now()
+	code, _, errOut := runWithCapturedOutput(t, []string{"status", "-socket", socketPath})
+	elapsed := time.Since(start)
+	if code != 1 {
+		t.Fatalf("run(status) code = %d, want 1", code)
+	}
+	if !strings.Contains(errOut, "status query failed") {
+		t.Fatalf("status stderr missing failure message: %q", errOut)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("expected status to fail fast due to read timeout, elapsed=%s", elapsed)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("status test server failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for status test server goroutine")
 	}
 }
 

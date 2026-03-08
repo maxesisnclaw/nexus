@@ -15,6 +15,7 @@ import (
 	"sort"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/maxesisn/nexus/pkg/config"
 	"github.com/maxesisn/nexus/pkg/daemon"
@@ -35,11 +36,14 @@ const (
 )
 
 var (
-	loadConfig              = config.Load
-	newDaemon               = func(cfg *config.Config, logger *slog.Logger) (daemonRunner, error) { return daemon.New(cfg, logger) }
-	notifyContext           = signal.NotifyContext
-	stdout        io.Writer = os.Stdout
-	stderr        io.Writer = os.Stderr
+	loadConfig                   = config.Load
+	newDaemon                    = func(cfg *config.Config, logger *slog.Logger) (daemonRunner, error) { return daemon.New(cfg, logger) }
+	notifyContext                = signal.NotifyContext
+	statusDialTimeout            = 2 * time.Second
+	statusWriteTimeout           = 5 * time.Second
+	statusReadTimeout            = 5 * time.Second
+	stdout             io.Writer = os.Stdout
+	stderr             io.Writer = os.Stderr
 )
 
 func main() {
@@ -135,18 +139,27 @@ func runStatus(args []string) int {
 		return 2
 	}
 
-	conn, err := net.Dial("unix", socketPath)
+	dialer := net.Dialer{Timeout: statusDialTimeout}
+	conn, err := dialer.Dial("unix", socketPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "status query failed: %v\n", err)
 		return 1
 	}
 	defer conn.Close()
 
+	if err := conn.SetWriteDeadline(time.Now().Add(statusWriteTimeout)); err != nil {
+		fmt.Fprintf(stderr, "status query failed: %v\n", err)
+		return 1
+	}
 	if err := writeControlMessage(conn, statusRequest{Cmd: "status"}); err != nil {
 		fmt.Fprintf(stderr, "status query failed: %v\n", err)
 		return 1
 	}
 
+	if err := conn.SetReadDeadline(time.Now().Add(statusReadTimeout)); err != nil {
+		fmt.Fprintf(stderr, "status query failed: %v\n", err)
+		return 1
+	}
 	var resp statusCommandResponse
 	if err := readControlMessage(conn, &resp); err != nil {
 		fmt.Fprintf(stderr, "status query failed: %v\n", err)

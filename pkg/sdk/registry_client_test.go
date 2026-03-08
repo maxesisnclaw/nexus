@@ -179,9 +179,10 @@ func TestRegistryClientWatchAckDeadline(t *testing.T) {
 	unsubscribe := client.Watch("svc-watch-deadline", func(registry.ChangeEvent) {})
 	elapsed := time.Since(start)
 
-	if unsubscribe != nil {
-		t.Fatal("expected nil unsubscribe when watch ack times out")
+	if unsubscribe == nil {
+		t.Fatal("expected non-nil unsubscribe when watch ack times out")
 	}
+	unsubscribe()
 	select {
 	case <-accepted:
 	case <-time.After(200 * time.Millisecond):
@@ -190,6 +191,21 @@ func TestRegistryClientWatchAckDeadline(t *testing.T) {
 	if elapsed > 500*time.Millisecond {
 		t.Fatalf("expected watch to fail fast due to ack deadline, elapsed=%s", elapsed)
 	}
+}
+
+func TestRegistryClientWatchDialFailureReturnsNoopUnsubscribe(t *testing.T) {
+	socket := filepath.Join("/tmp", fmt.Sprintf("nexus-sdk-registry-watch-missing-%d.sock", time.Now().UnixNano()))
+	t.Cleanup(func() { _ = os.Remove(socket) })
+
+	client := newRegistryClient(socket, "node-a", slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	defer client.Close()
+
+	unsubscribe := client.Watch("svc-watch-dial-fail", func(registry.ChangeEvent) {})
+	if unsubscribe == nil {
+		t.Fatal("expected non-nil unsubscribe when watch dial fails")
+	}
+
+	unsubscribe()
 }
 
 func TestRegistryClientWatchClearsDeadlineAfterAck(t *testing.T) {

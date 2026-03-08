@@ -35,12 +35,20 @@ func newConnectionPool(router *transport.Router) connectionPool {
 }
 
 func (p *dialConnectionPool) Acquire(ctx context.Context, endpoint transport.ServiceEndpoint) (transport.Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	key := endpointPoolKey(endpoint)
 
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
 		return nil, errors.New("connection pool is closed")
+	}
+	if err := ctx.Err(); err != nil {
+		p.mu.Unlock()
+		return nil, err
 	}
 	if conns := p.idle[key]; len(conns) > 0 {
 		conn := conns[len(conns)-1]

@@ -146,32 +146,33 @@ func (c *registryClient) Lookup(name string) []registry.ServiceInstance {
 }
 
 func (c *registryClient) Watch(name string, cb func(registry.ChangeEvent)) (unsubscribe func()) {
+	noopUnsubscribe := func() {}
 	if cb == nil {
 		cb = func(registry.ChangeEvent) {}
 	}
 	if name == "" {
-		return func() {}
+		return noopUnsubscribe
 	}
 	conn, err := c.dial()
 	if err != nil {
 		c.logger.Debug("remote watch dial failed", "name", name, "err", err)
-		return nil
+		return noopUnsubscribe
 	}
 	if err := conn.SetDeadline(time.Now().Add(registryClientIODeadline)); err != nil {
 		_ = conn.Close()
 		c.logger.Debug("remote watch set deadline failed", "name", name, "err", err)
-		return nil
+		return noopUnsubscribe
 	}
 	if err := writeRegistryMessage(conn, registryRequest{Cmd: "watch", Name: name}); err != nil {
 		_ = conn.Close()
 		c.logger.Debug("remote watch request failed", "name", name, "err", err)
-		return nil
+		return noopUnsubscribe
 	}
 	var ack controlReply
 	if err := readRegistryMessage(conn, &ack); err != nil {
 		_ = conn.Close()
 		c.logger.Debug("remote watch ack failed", "name", name, "err", err)
-		return nil
+		return noopUnsubscribe
 	}
 	if !ack.OK {
 		_ = conn.Close()
@@ -179,12 +180,12 @@ func (c *registryClient) Watch(name string, cb func(registry.ChangeEvent)) (unsu
 			ack.Error = "watch failed"
 		}
 		c.logger.Debug("remote watch rejected", "name", name, "err", ack.Error)
-		return nil
+		return noopUnsubscribe
 	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		_ = conn.Close()
 		c.logger.Debug("remote watch clear deadline failed", "name", name, "err", err)
-		return nil
+		return noopUnsubscribe
 	}
 
 	watchID, unregister := c.trackWatch(conn)
