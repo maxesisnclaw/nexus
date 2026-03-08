@@ -20,19 +20,15 @@ health_interval = "5s"
 # Default: "10s"
 shutdown_grace = "10s"
 
-# Optional Noise-encrypted TCP listener for cross-host communication.
-# Empty means disabled.
-listen = "127.0.0.1:7700"
+# Reserved for future daemon TCP control-plane listener.
+# Current runtime rejects non-empty values.
+listen = ""
 
-# Noise static private key file (hex-encoded 32-byte private key).
-# If the file does not exist, daemon can generate it.
-noise_key_file = "/etc/nexus/noise.key"
+# Reserved for future daemon TCP control-plane support.
+noise_key_file = ""
 
-# Trusted Noise responder public keys (hex strings).
-# Leave empty to trust keys supplied by endpoint metadata only.
-trusted_keys = [
-  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-]
+# Reserved for future daemon TCP control-plane support.
+trusted_keys = []
 
 # ----------------------------------------------------------------------------
 # Service 1: gateway (binary, singleton)

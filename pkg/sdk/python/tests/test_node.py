@@ -135,6 +135,12 @@ def test_node_tcp_listener_enforces_loopback(registry_socket_path: str) -> None:
         node._start_tcp_listener("0.0.0.0:0")
 
 
+def test_loopback_detection_uses_ip_semantics() -> None:
+    assert Node._is_loopback_tcp_addr("127.0.0.2:9000")
+    assert Node._is_loopback_tcp_addr("[::1]:9000")
+    assert not Node._is_loopback_tcp_addr("128.0.0.1:9000")
+
+
 def test_call_missing_service_cleans_round_robin_offset(registry_socket_path: str) -> None:
     class _MissingRegistry:
         def lookup(self, _: str) -> list[dict[str, object]]:

@@ -28,6 +28,7 @@ const (
 
 var createMemfd = transport.CreateMemfd
 var nodeHeartbeatInterval = 5 * time.Second
+var nodeCloseDrainTimeout = 5 * time.Second
 
 type nodeState int
 
@@ -795,12 +796,40 @@ func (c *Node) Close() error {
 			}
 		}
 		c.mu.Unlock()
+
+		if err := waitForWaitGroup(&c.activeWg, nodeCloseDrainTimeout); err != nil {
+			c.mu.Lock()
+			c.closeErr = errors.Join(c.closeErr, err)
+			c.mu.Unlock()
+		}
 	})
-	c.activeWg.Wait()
-	if c.closeErr != nil {
-		return fmt.Errorf("node %s/%s: close: %w", c.cfg.Name, c.cfg.ID, c.closeErr)
+	c.mu.RLock()
+	closeErr := c.closeErr
+	c.mu.RUnlock()
+	if closeErr != nil {
+		return fmt.Errorf("node %s/%s: close: %w", c.cfg.Name, c.cfg.ID, closeErr)
 	}
 	return nil
+}
+
+func waitForWaitGroup(wg *sync.WaitGroup, timeout time.Duration) error {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	if timeout <= 0 {
+		<-done
+		return nil
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("active handlers did not drain within %s", timeout)
+	}
 }
 
 func (c *Node) register(ctx context.Context, endpoints []registry.Endpoint) error {

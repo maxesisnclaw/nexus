@@ -104,10 +104,8 @@ Nexus v0.4 uses two trust models:
 - UDS trust model: access control by filesystem permissions on `/run/nexus/*` sockets.
 - TCP trust model: Noise Protocol encryption/authentication (NK pattern, Curve25519 + ChaCha20-Poly1305).
 
-For TCP listeners, configure:
-- `daemon.listen`
-- `daemon.noise_key_file`
-- optional `daemon.trusted_keys` for strict peer key allow-listing
+Daemon `daemon.listen` is reserved for future TCP control-plane support.
+Current daemon startup rejects non-empty `daemon.listen`.
 
 ## Examples
 

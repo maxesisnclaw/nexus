@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
-# TODO: pin to digest for reproducibility (e.g., golang:1.26.0-bookworm@sha256:...)
-FROM golang:1.26.0-bookworm
+# TODO: pin to digest for reproducibility (e.g., golang:1.26.1-bookworm@sha256:...)
+FROM golang:1.26.1-bookworm
 
 WORKDIR /workspace
 

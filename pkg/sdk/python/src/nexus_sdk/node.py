@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import socket
@@ -19,7 +20,7 @@ from .transport import recv_message, send_message
 DEFAULT_REGISTRY_ADDR = "/run/nexus/registry.sock"
 _HEARTBEAT_INTERVAL_SECONDS = 5.0
 _TCP_IDLE_TIMEOUT_SECONDS = 300.0
-_TCP_LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
+_TCP_LOOPBACK_HOSTS = ("localhost",)
 logger = logging.getLogger("nexus_sdk")
 
 
@@ -554,7 +555,12 @@ class Node:
         host = host.strip().lower()
         if host in {"", "0.0.0.0", "::"}:
             return False
-        return host in _TCP_LOOPBACK_HOSTS
+        if host in _TCP_LOOPBACK_HOSTS:
+            return True
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return False
 
     def _validate_tcp_listen_addr(self, addr: str) -> None:
         if self._allow_insecure_tcp:

@@ -247,7 +247,7 @@ func TestDaemonStartFailureResetsState(t *testing.T) {
 	}
 }
 
-func TestDaemonStartRejectsTCPListenWithoutNoiseKey(t *testing.T) {
+func TestDaemonStartRejectsUnsupportedTCPListen(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	cfg := &config.Config{
 		Daemon: config.DaemonConfig{
@@ -263,11 +263,13 @@ func TestDaemonStartRejectsTCPListenWithoutNoiseKey(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := d.Start(ctx); err == nil {
-		t.Fatal("expected Start() to fail without daemon.noise_key_file")
+		t.Fatal("expected Start() to fail when daemon.listen is configured")
+	} else if !strings.Contains(err.Error(), "daemon.listen is not supported yet") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestDaemonStartWithNoiseTCPListener(t *testing.T) {
+func TestDaemonStartRejectsUnsupportedTCPListenEvenWithNoiseKey(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	keyFile := filepath.Join(t.TempDir(), "daemon-noise.key")
 	cfg := &config.Config{
@@ -284,14 +286,13 @@ func TestDaemonStartWithNoiseTCPListener(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := d.Start(ctx); err != nil {
-		t.Fatalf("Start() error = %v", err)
+	if err := d.Start(ctx); err == nil {
+		t.Fatal("expected Start() to fail when daemon.listen is configured")
+	} else if !strings.Contains(err.Error(), "daemon.listen is not supported yet") {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if _, err := os.Stat(keyFile); err != nil {
-		t.Fatalf("expected generated noise key file: %v", err)
-	}
-	if err := d.Stop(); err != nil {
-		t.Fatalf("Stop() error = %v", err)
+	if _, err := os.Stat(keyFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no noise key generation, got err=%v", err)
 	}
 }
 

@@ -956,6 +956,44 @@ func TestCloseUsesSyncOnce(t *testing.T) {
 	}
 }
 
+func TestCloseTimesOutWhenActiveHandlersDoNotDrain(t *testing.T) {
+	previous := nodeCloseDrainTimeout
+	nodeCloseDrainTimeout = 30 * time.Millisecond
+	defer func() {
+		nodeCloseDrainTimeout = previous
+	}()
+
+	client, err := New(Config{Name: "svc", UDSAddr: testSocketPath(t, "close-timeout")})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	client.activeWg.Add(1)
+	start := time.Now()
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- client.Close()
+	}()
+
+	var closeErr error
+	select {
+	case closeErr = <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Close() blocked while waiting for active handlers")
+	}
+	client.activeWg.Done()
+
+	if closeErr == nil {
+		t.Fatal("expected Close() timeout error")
+	}
+	if !strings.Contains(closeErr.Error(), "active handlers did not drain within") {
+		t.Fatalf("unexpected Close() error: %v", closeErr)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("expected bounded Close() wait, got %s", elapsed)
+	}
+}
+
 func TestCloseCleansConnectionPoolResources(t *testing.T) {
 	reg := registry.New("node-a")
 	defer reg.Close()

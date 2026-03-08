@@ -23,10 +23,10 @@ type DaemonConfig struct {
 	ShutdownGrace Duration `toml:"shutdown_grace"`
 	// Peer-based registry sync is planned for a future version.
 	// Listen is reserved for future daemon cross-node TCP listener wiring.
-	// Current runtime does not consume this field yet.
+	// Current runtime rejects non-empty values at startup.
 	Listen string `toml:"listen"`
 	// NoiseKeyFile is the path to the Noise Protocol static key file.
-	// If empty, encrypted TCP listener startup is refused.
+	// This setting is reserved for future daemon TCP control-plane support.
 	NoiseKeyFile string `toml:"noise_key_file"`
 	// TrustedKeys lists trusted Noise server public keys in hex form.
 	TrustedKeys []string `toml:"trusted_keys"`
