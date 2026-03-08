@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -195,6 +196,47 @@ func TestTCPTransportAllowsNonLoopbackWithOptIn(t *testing.T) {
 		t.Fatalf("Listen() error = %v", err)
 	}
 	_ = ln.Close()
+}
+
+func TestTCPTransportDialRejectsNonLoopbackPlaintextByDefault(t *testing.T) {
+	t.Setenv(insecureTCPDialEnv, "")
+	tcp := NewTCPTransport()
+
+	_, err := tcp.Dial(context.Background(), ServiceEndpoint{TCPAddr: "203.0.113.10:9000"})
+	if err == nil {
+		t.Fatal("expected non-loopback plaintext tcp dial error")
+	}
+	if !strings.Contains(err.Error(), "refusing non-loopback plaintext tcp dial") {
+		t.Fatalf("unexpected dial error: %v", err)
+	}
+}
+
+func TestTCPTransportDialAllowsNonLoopbackWithOptIn(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	tcp := NewTCPTransportWithInsecureRemoteDial(true)
+
+	conn, err := tcp.Dial(ctx, ServiceEndpoint{TCPAddr: "203.0.113.11:9001"})
+	if err != nil && strings.Contains(err.Error(), "refusing non-loopback plaintext tcp dial") {
+		t.Fatalf("expected non-policy dial error, got %v", err)
+	}
+	if err == nil {
+		_ = conn.Close()
+	}
+}
+
+func TestTCPTransportDialAllowsLocalNonLoopbackWithoutOptIn(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	tcp := NewTCPTransport()
+
+	conn, err := tcp.Dial(ctx, ServiceEndpoint{TCPAddr: "203.0.113.12:9002", Local: true})
+	if err != nil && strings.Contains(err.Error(), "refusing non-loopback plaintext tcp dial") {
+		t.Fatalf("expected local dial to bypass policy guard, got %v", err)
+	}
+	if err == nil {
+		_ = conn.Close()
+	}
 }
 
 func TestUDSListenRejectsExistingNonSocket(t *testing.T) {

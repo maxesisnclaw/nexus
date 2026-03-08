@@ -138,6 +138,8 @@ type Config struct {
 	TrustedNoiseKeys []string
 	// Network controls exposure mode such as uds, tcp, or dual.
 	Network string
+	// AllowInsecureTCP permits non-loopback plaintext TCP calls.
+	AllowInsecureTCP bool
 	// RequestTimeout bounds a single outbound call.
 	RequestTimeout time.Duration
 	// ServeTimeout bounds server-side request handling per connection cycle.
@@ -282,7 +284,7 @@ func New(cfg Config) (*Node, error) {
 	cfg.TrustedNoiseKeys = normalizeTrustedNoiseKeys(cfg.TrustedNoiseKeys)
 
 	if cfg.Router == nil {
-		tcpTransport := transport.Transport(transport.NewTCPTransport())
+		tcpTransport := transport.Transport(transport.NewTCPTransportWithInsecureRemoteDial(cfg.AllowInsecureTCP))
 		if len(cfg.NoisePrivateKey) == 32 || len(cfg.NoisePublicKey) == 32 || len(cfg.TrustedNoiseKeys) > 0 {
 			tcpTransport = transport.NewNoiseTCPTransport(cfg.NoisePrivateKey, cfg.NoisePublicKey, cfg.TrustedNoiseKeys)
 		}
@@ -445,6 +447,9 @@ func (c *Node) callOnce(serviceName, method string, payload []byte, preferFD boo
 	if err != nil {
 		return nil, err
 	}
+	if err := c.validateTCPDialSecurity(endpoint); err != nil {
+		return nil, err
+	}
 	c.warnUntrustedNoise(endpoint)
 	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.RequestTimeout)
 	defer cancel()
@@ -480,16 +485,16 @@ func (c *Node) callOnce(serviceName, method string, payload []byte, preferFD boo
 	setup := &transport.Message{Method: fdCallMethod, Headers: map[string]string{"method": method}}
 	if err := conn.Send(setup); err != nil {
 		reusable = false
-		return c.callMsgpackFallback(endpoint, method, payload)
+		return c.callMsgpackFallbackCtx(ctx, endpoint, method, payload)
 	}
 	ack, err := conn.Recv()
 	if err != nil || ack.Headers[fdReadyKey] != "1" {
 		reusable = false
-		return c.callMsgpackFallback(endpoint, method, payload)
+		return c.callMsgpackFallbackCtx(ctx, endpoint, method, payload)
 	}
 	if err := conn.SendFd(fd, []byte("fd")); err != nil {
 		reusable = false
-		return c.callMsgpackFallback(endpoint, method, payload)
+		return c.callMsgpackFallbackCtx(ctx, endpoint, method, payload)
 	}
 	resp, err := conn.Recv()
 	if err != nil {
@@ -509,6 +514,9 @@ func (c *Node) callOnceCtx(ctx context.Context, serviceName, method string, payl
 	}
 	endpoint, err := endpointFromInstance(inst, c.localNodeID)
 	if err != nil {
+		return nil, err
+	}
+	if err := c.validateTCPDialSecurity(endpoint); err != nil {
 		return nil, err
 	}
 	c.warnUntrustedNoise(endpoint)
@@ -566,10 +574,6 @@ func (c *Node) callOnceCtx(ctx context.Context, serviceName, method string, payl
 		return nil, &BusinessError{Message: msgErr}
 	}
 	return &Response{Payload: resp.Payload, Headers: resp.Headers}, nil
-}
-
-func (c *Node) callMsgpackFallback(endpoint transport.ServiceEndpoint, method string, payload []byte) (*Response, error) {
-	return c.callMsgpackFallbackCtx(context.Background(), endpoint, method, payload)
 }
 
 func (c *Node) callMsgpackFallbackCtx(ctx context.Context, endpoint transport.ServiceEndpoint, method string, payload []byte) (*Response, error) {
@@ -933,6 +937,19 @@ func (c *Node) warnUntrustedNoise(endpoint transport.ServiceEndpoint) {
 	c.noiseTrustWarnOnce.Do(func() {
 		c.logger.Warn("No trusted Noise keys configured; accepting any authenticated peer")
 	})
+}
+
+func (c *Node) validateTCPDialSecurity(endpoint transport.ServiceEndpoint) error {
+	if endpoint.TCPAddr == "" || len(endpoint.PublicKey) == 32 {
+		return nil
+	}
+	if c.cfg.AllowInsecureTCP || endpoint.Local || transport.IsLoopbackTCPAddr(endpoint.TCPAddr) {
+		return nil
+	}
+	return fmt.Errorf(
+		"refusing non-loopback plaintext tcp call to %s without encryption; set allow_insecure_tcp=true to override",
+		endpoint.TCPAddr,
+	)
 }
 
 func (c *Node) listen(ctx context.Context) ([]transport.Listener, []registry.Endpoint, error) {

@@ -510,6 +510,66 @@ func TestCallWithDataFallbackAcquireFailure(t *testing.T) {
 	}
 }
 
+func TestCallWithDataFallbackPreservesOriginalTimeout(t *testing.T) {
+	origCreateMemfd := createMemfd
+	createMemfd = func(string, []byte) (int, error) {
+		return syscall.Dup(0)
+	}
+	defer func() {
+		createMemfd = origCreateMemfd
+	}()
+
+	reg := registry.New("node-a")
+	defer reg.Close()
+
+	const addr = "/tmp/echo-fd-fallback-timeout.sock"
+	_ = reg.Register(registry.ServiceInstance{
+		Name:      "echo",
+		ID:        "echo-1",
+		Endpoints: []registry.Endpoint{{Type: registry.EndpointUDS, Addr: addr}},
+	})
+
+	rt := &routingTransport{
+		queues: map[string][]transport.Conn{
+			addr: {
+				&scriptedConn{
+					sendDelay: 100 * time.Millisecond,
+					sendErr:   errors.New("setup send failed"),
+				},
+				newBlockingConn(),
+			},
+		},
+	}
+
+	timeout := 150 * time.Millisecond
+	client, err := New(Config{
+		Name:                  "caller",
+		ID:                    "caller-timeout",
+		Registry:              reg,
+		Router:                transport.NewRouter(rt, rt),
+		RequestTimeout:        timeout,
+		LargePayloadThreshold: 4,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer client.Close()
+
+	payload := bytes.Repeat([]byte("x"), 32)
+	start := time.Now()
+	_, err = client.CallWithData("echo", "echo", payload)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if elapsed > timeout+70*time.Millisecond {
+		t.Fatalf("expected fallback call to respect original timeout %s, got %s", timeout, elapsed)
+	}
+	if got := rt.dialCount(addr); got != 2 {
+		t.Fatalf("expected fd attempt plus fallback dial, got %d", got)
+	}
+}
+
 func TestCallWithDataFDResponseBranches(t *testing.T) {
 	origCreateMemfd := createMemfd
 	createMemfd = func(string, []byte) (int, error) {
@@ -1231,6 +1291,85 @@ func TestServeTCPNoiseRegistersMetadataAndRoutesCalls(t *testing.T) {
 	}
 }
 
+func TestCallRejectsNonLoopbackPlaintextTCPWithoutOptIn(t *testing.T) {
+	reg := registry.New("node-a")
+	defer reg.Close()
+
+	const remoteAddr = "203.0.113.40:9000"
+	_ = reg.Register(registry.ServiceInstance{
+		Name:      "svc-plain-remote",
+		ID:        "svc-plain-remote-1",
+		Node:      "node-remote",
+		Endpoints: []registry.Endpoint{{Type: registry.EndpointTCP, Addr: remoteAddr}},
+	})
+
+	rt := &routingTransport{
+		queues: map[string][]transport.Conn{
+			remoteAddr: {&echoConn{}},
+		},
+	}
+	caller, err := New(Config{
+		Name:     "caller-plain-remote",
+		ID:       "caller-plain-remote-1",
+		Registry: reg,
+		Router:   transport.NewRouter(rt, rt),
+	})
+	if err != nil {
+		t.Fatalf("New(caller) error = %v", err)
+	}
+	defer caller.Close()
+
+	if _, err := caller.Call("svc-plain-remote", "echo", []byte("ok")); err == nil {
+		t.Fatal("expected plaintext non-loopback tcp call to be rejected")
+	} else if !strings.Contains(err.Error(), "refusing non-loopback plaintext tcp call") {
+		t.Fatalf("unexpected call error: %v", err)
+	}
+	if got := rt.dialCount(remoteAddr); got != 0 {
+		t.Fatalf("expected no dial attempt when policy blocks, got %d", got)
+	}
+}
+
+func TestCallAllowsNonLoopbackPlaintextTCPWithOptIn(t *testing.T) {
+	reg := registry.New("node-a")
+	defer reg.Close()
+
+	const remoteAddr = "203.0.113.41:9001"
+	_ = reg.Register(registry.ServiceInstance{
+		Name:      "svc-plain-remote-allow",
+		ID:        "svc-plain-remote-allow-1",
+		Node:      "node-remote",
+		Endpoints: []registry.Endpoint{{Type: registry.EndpointTCP, Addr: remoteAddr}},
+	})
+
+	rt := &routingTransport{
+		queues: map[string][]transport.Conn{
+			remoteAddr: {&echoConn{}},
+		},
+	}
+	caller, err := New(Config{
+		Name:             "caller-plain-remote-allow",
+		ID:               "caller-plain-remote-allow-1",
+		Registry:         reg,
+		Router:           transport.NewRouter(rt, rt),
+		AllowInsecureTCP: true,
+	})
+	if err != nil {
+		t.Fatalf("New(caller) error = %v", err)
+	}
+	defer caller.Close()
+
+	resp, err := caller.Call("svc-plain-remote-allow", "echo", []byte("ok"))
+	if err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if string(resp.Payload) != "ok" {
+		t.Fatalf("unexpected response payload: %q", string(resp.Payload))
+	}
+	if got := rt.dialCount(remoteAddr); got != 1 {
+		t.Fatalf("expected one dial with explicit opt-in, got %d", got)
+	}
+}
+
 func TestServeReturnsRegistrationErrorAfterRetries(t *testing.T) {
 	node, err := New(Config{
 		Name:            "svc-register-fail",
@@ -1569,6 +1708,7 @@ type scriptedConn struct {
 	recvQueue []*transport.Message
 	recvMsg   *transport.Message
 	recvErr   error
+	sendDelay time.Duration
 	sendErr   error
 	sendFdErr error
 	sendFdOK  bool
@@ -1578,6 +1718,9 @@ type scriptedConn struct {
 }
 
 func (s *scriptedConn) Send(msg *transport.Message) error {
+	if s.sendDelay > 0 {
+		time.Sleep(s.sendDelay)
+	}
 	if s.sendErr != nil {
 		return s.sendErr
 	}
