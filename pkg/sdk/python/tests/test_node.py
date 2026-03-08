@@ -446,3 +446,161 @@ def test_pick_endpoint_prefers_local_uds_and_remote_tcp(registry_socket_path: st
         assert unknown_use_tcp is True
     finally:
         node.close()
+
+
+def test_call_business_error_does_not_log_warning_or_discard_connection(
+    monkeypatch: Any,
+    caplog: Any,
+    registry_socket_path: str,
+) -> None:
+    class _RemoteRegistry:
+        def lookup(self, _: str) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": "echo-business-1",
+                    "node": "remote-node",
+                    "endpoints": [{"type": "tcp", "addr": "127.0.0.1:9011"}],
+                }
+            ]
+
+        def unregister(self, _: str) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    class _FakeConn:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def settimeout(self, _timeout: float) -> None:
+            return
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _Pool:
+        def __init__(self) -> None:
+            self.conn = _FakeConn()
+            self.put_calls = 0
+
+        def get(self, _addr: str, *, use_tcp: bool, timeout: float | None = None) -> _FakeConn:
+            assert use_tcp
+            assert timeout is not None
+            return self.conn
+
+        def put(self, _addr: str, _conn: _FakeConn, *, use_tcp: bool) -> None:
+            assert use_tcp
+            self.put_calls += 1
+
+        def close_all(self) -> None:
+            return
+
+    node = Node(name="caller", id="caller-business", registry_addr=registry_socket_path)
+    pool = _Pool()
+    node._registry = _RemoteRegistry()  # type: ignore[assignment]
+    node._pool = pool  # type: ignore[assignment]
+    monkeypatch.setattr(node_module, "send_message", lambda _conn, _msg: None)
+    monkeypatch.setattr(
+        node_module,
+        "recv_message",
+        lambda _conn: {"payload": b"", "headers": {"error": "invalid request"}},
+    )
+    caplog.set_level("WARNING", logger="nexus_sdk")
+    try:
+        with pytest.raises(RuntimeError, match="invalid request"):
+            node.call("echo", "echo", b"hello")
+        assert pool.put_calls == 1
+        assert pool.conn.closed is False
+        assert not any(
+            "unexpected RPC call failure" in record.getMessage() for record in caplog.records
+        )
+    finally:
+        node.close()
+
+
+def test_node_reregisters_after_registry_state_loss(
+    monkeypatch: Any,
+    mock_registry: Any,
+    registry_socket_path: str,
+    socket_path_factory: Any,
+) -> None:
+    monkeypatch.setattr(node_module, "_HEARTBEAT_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(node_module, "_HEARTBEAT_FAILURES_BEFORE_RECOVERY", 1)
+
+    node = Node(
+        name="recover",
+        id="recover-1",
+        uds_addr=socket_path_factory("recover.sock"),
+        registry_addr=registry_socket_path,
+        capabilities=["fast", "safe"],
+    )
+    try:
+        node.serve_async()
+        _wait_for_service(registry_socket_path, "recover")
+
+        with mock_registry._lock:
+            mock_registry._instances.clear()
+
+        _wait_for_service(registry_socket_path, "recover", timeout=3.0)
+    finally:
+        node.close()
+
+
+def test_heartbeat_recovery_waits_for_failure_threshold(registry_socket_path: str) -> None:
+    class _LoopStop:
+        def __init__(self, iterations: int) -> None:
+            self._iterations = iterations
+            self._calls = 0
+            self._set = False
+
+        def wait(self, _timeout: float) -> bool:
+            if self._set:
+                return True
+            if self._calls >= self._iterations:
+                return True
+            self._calls += 1
+            return False
+
+        def set(self) -> None:
+            self._set = True
+
+    class _FailingRegistry:
+        def __init__(self) -> None:
+            self.register_calls = 0
+
+        def heartbeat(self, _id: str) -> None:
+            raise RuntimeError("instance not found")
+
+        def register(
+            self,
+            _name: str,
+            _id: str,
+            *,
+            endpoints: list[dict[str, str]],
+            capabilities: list[str],
+            ttl_ms: int,
+        ) -> None:
+            assert endpoints
+            assert isinstance(capabilities, list)
+            assert ttl_ms > 0
+            self.register_calls += 1
+            return
+
+        def unregister(self, _id: str) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    node = Node(name="bounded", id="bounded-1", registry_addr=registry_socket_path)
+    fake_registry = _FailingRegistry()
+    node._registry = fake_registry  # type: ignore[assignment]
+    node._registered = True
+    node._registered_endpoints = [{"type": "uds", "addr": "/tmp/bounded.sock"}]
+    node._stop = _LoopStop(node_module._HEARTBEAT_FAILURES_BEFORE_RECOVERY)  # type: ignore[assignment]
+    try:
+        node._heartbeat_loop()
+        assert fake_registry.register_calls == 1
+    finally:
+        node.close()

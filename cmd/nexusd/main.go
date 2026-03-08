@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/maxesisn/nexus/pkg/config"
+	"github.com/maxesisn/nexus/pkg/controlplane"
 	"github.com/maxesisn/nexus/pkg/daemon"
 	"github.com/maxesisn/nexus/pkg/transport"
 	"github.com/vmihailenco/msgpack/v5"
@@ -32,7 +33,7 @@ const (
 	defaultConfigPath     = "./nexus.toml"
 	defaultControlSocket  = "/run/nexus/registry.sock"
 	defaultKeyPath        = "./nexus.key"
-	maxControlMessageSize = 64 * 1024 * 1024
+	maxControlMessageSize = controlplane.MaxMessageSize
 )
 
 var (

@@ -13,13 +13,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/maxesisn/nexus/pkg/controlplane"
 	"github.com/maxesisn/nexus/pkg/registry"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
 // Control-plane messages are expected to stay small. Keep a strict cap so one
 // connection cannot force large frame allocations.
-const maxControlMessageSize = 1 * 1024 * 1024
+const maxControlMessageSize = controlplane.MaxMessageSize
 const maxControlConns = 64
 const controlReadTimeout = 5 * time.Minute
 

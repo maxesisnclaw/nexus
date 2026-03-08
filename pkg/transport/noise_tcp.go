@@ -59,7 +59,7 @@ func (t *NoiseTCPTransport) Dial(ctx context.Context, target ServiceEndpoint) (C
 		return nil, fmt.Errorf("tcp dial %s: %w", target.TCPAddr, err)
 	}
 
-	conn, err := t.handshakeInitiator(raw, target.PublicKey)
+	conn, err := t.handshakeInitiator(ctx, raw, target.PublicKey)
 	if err != nil {
 		_ = raw.Close()
 		return nil, fmt.Errorf("noise handshake initiator %s: %w", target.TCPAddr, err)
@@ -85,7 +85,11 @@ func (t *NoiseTCPTransport) Listen(_ context.Context, addr string) (Listener, er
 	return &noiseTCPListener{ln: ln, transport: t}, nil
 }
 
-func (t *NoiseTCPTransport) handshakeInitiator(raw net.Conn, targetPublicKey []byte) (Conn, error) {
+func (t *NoiseTCPTransport) handshakeInitiator(ctx context.Context, raw net.Conn, targetPublicKey []byte) (Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	hs, err := noise.NewHandshakeState(noise.Config{
 		CipherSuite: noiseSuite,
 		Pattern:     noise.HandshakeNK,
@@ -96,29 +100,63 @@ func (t *NoiseTCPTransport) handshakeInitiator(raw net.Conn, targetPublicKey []b
 		return nil, err
 	}
 
-	_ = raw.SetDeadline(time.Now().Add(noiseHandshakeTimeout))
+	deadline := time.Now().Add(noiseHandshakeTimeout)
+	deadlineFromContext := false
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+		deadlineFromContext = true
+	}
+	_ = raw.SetDeadline(deadline)
+	stopCancel := context.AfterFunc(ctx, func() { _ = raw.SetDeadline(time.Now()) })
+	defer stopCancel()
 	defer func() { _ = raw.SetDeadline(time.Time{}) }()
 
 	initMsg, _, _, err := hs.WriteMessage(nil, nil)
 	if err != nil {
+		if ctxErr := handshakeContextErr(ctx, err, deadline, deadlineFromContext); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, err
 	}
 	if err := writeLengthPrefixed(raw, initMsg); err != nil {
+		if ctxErr := handshakeContextErr(ctx, err, deadline, deadlineFromContext); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, err
 	}
 
 	resp, err := readLengthPrefixed(raw, noise.MaxMsgLen)
 	if err != nil {
+		if ctxErr := handshakeContextErr(ctx, err, deadline, deadlineFromContext); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, err
 	}
 	_, csSend, csRecv, err := hs.ReadMessage(nil, resp)
 	if err != nil {
+		if ctxErr := handshakeContextErr(ctx, err, deadline, deadlineFromContext); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, err
 	}
 	if csSend == nil || csRecv == nil {
 		return nil, errors.New("noise handshake did not produce cipher states")
 	}
 	return &noiseConn{raw: raw, cs: csSend, csRecv: csRecv}, nil
+}
+
+func handshakeContextErr(ctx context.Context, opErr error, deadline time.Time, deadlineFromContext bool) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if !deadlineFromContext {
+		return nil
+	}
+	var netErr net.Error
+	if errors.As(opErr, &netErr) && netErr.Timeout() && !deadline.IsZero() && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 func (t *NoiseTCPTransport) handshakeResponder(raw net.Conn) (Conn, error) {

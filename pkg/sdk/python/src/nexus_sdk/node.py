@@ -19,6 +19,8 @@ from .transport import recv_message, send_message
 
 DEFAULT_REGISTRY_ADDR = "/run/nexus/registry.sock"
 _HEARTBEAT_INTERVAL_SECONDS = 5.0
+_HEARTBEAT_FAILURES_BEFORE_RECOVERY = 3
+_REGISTRATION_TTL_MS = 15000
 _TCP_IDLE_TIMEOUT_SECONDS = 300.0
 _TCP_LOOPBACK_HOSTS = ("localhost",)
 logger = logging.getLogger("nexus_sdk")
@@ -39,6 +41,10 @@ class Response:
 
     payload: bytes
     headers: dict[str, str] | None = None
+
+
+class _RPCBusinessError(RuntimeError):
+    pass
 
 
 class Node:
@@ -84,6 +90,8 @@ class Node:
         self._state_lock = threading.Lock()
         self._state = "new"
         self._registered = False
+        self._registered_endpoints: list[dict[str, str]] = []
+        self._heartbeat_failures = 0
 
         self._stop = threading.Event()
         self._serve_thread: threading.Thread | None = None
@@ -165,11 +173,13 @@ class Node:
                     headers = {}
                 error = headers.get("error")
                 if error:
-                    raise RuntimeError(str(error))
+                    raise _RPCBusinessError(str(error))
                 body = resp.get("payload", b"")
                 if not isinstance(body, (bytes, bytearray)):
                     raise RuntimeError("invalid response payload")
                 return Response(payload=bytes(body), headers=headers)
+            except _RPCBusinessError as exc:
+                raise RuntimeError(str(exc))
             except socket.timeout as exc:
                 reusable = False
                 timeout_error = TimeoutError(
@@ -297,9 +307,11 @@ class Node:
                 self._id,
                 endpoints=endpoints,
                 capabilities=self._capabilities,
-                ttl_ms=15000,
+                ttl_ms=_REGISTRATION_TTL_MS,
             )
             self._registered = True
+            self._registered_endpoints = [dict(endpoint) for endpoint in endpoints]
+            self._heartbeat_failures = 0
 
             self._heartbeat_thread = threading.Thread(
                 target=self._heartbeat_loop,
@@ -326,6 +338,7 @@ class Node:
                 except Exception as exc:
                     logger.warning("unregister failed for %s during startup rollback: %s", self._id, exc)
                 self._registered = False
+            self._registered_endpoints = []
             self._listeners = []
             with self._state_lock:
                 if self._state != "closed":
@@ -441,12 +454,38 @@ class Node:
         while not self._stop.wait(_HEARTBEAT_INTERVAL_SECONDS):
             try:
                 self._registry.heartbeat(self._id)
-            except (OSError, EOFError) as exc:
+            except Exception as exc:
+                self._heartbeat_failures += 1
+                if self._attempt_heartbeat_recovery(exc):
+                    continue
                 logger.warning("heartbeat failed for %s: %s", self._id, exc)
                 continue
-            except Exception as exc:
-                logger.warning("unexpected heartbeat failure for %s: %s", self._id, exc)
-                continue
+            self._heartbeat_failures = 0
+
+    def _attempt_heartbeat_recovery(self, err: Exception) -> bool:
+        if self._heartbeat_failures < _HEARTBEAT_FAILURES_BEFORE_RECOVERY:
+            return False
+        if "instance not found" not in str(err).lower():
+            return False
+        if not self._registered_endpoints:
+            return False
+
+        try:
+            self._registry.register(
+                self._name,
+                self._id,
+                endpoints=[dict(endpoint) for endpoint in self._registered_endpoints],
+                capabilities=list(self._capabilities),
+                ttl_ms=_REGISTRATION_TTL_MS,
+            )
+        except Exception as exc:
+            logger.warning("heartbeat recovery register failed for %s: %s", self._id, exc)
+            return False
+
+        self._registered = True
+        self._heartbeat_failures = 0
+        logger.info("re-registered after heartbeat failure for %s", self._id)
+        return True
 
     def _pick_instance(self, service: str, instances: list[dict[str, object]]) -> dict[str, object]:
         with self._rr_lock:

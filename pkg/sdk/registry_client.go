@@ -10,13 +10,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/maxesisn/nexus/pkg/controlplane"
 	"github.com/maxesisn/nexus/pkg/registry"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
 const (
 	registryClientDialTimeout = 2 * time.Second
-	maxRegistryMessageSize    = 64 * 1024 * 1024
+	maxRegistryMessageSize    = controlplane.MaxMessageSize
 )
 
 var registryClientIODeadline = 10 * time.Second

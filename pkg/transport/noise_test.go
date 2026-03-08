@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,6 +204,94 @@ func TestNoiseDialWithWrongKeyRejected(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for listener accept exit")
+	}
+}
+
+func TestNoiseDialHandshakeHonorsContextCancellation(t *testing.T) {
+	_, serverPub := GenerateKeypair()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		accepted <- conn
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelAfter := 80 * time.Millisecond
+	go func() {
+		time.Sleep(cancelAfter)
+		cancel()
+	}()
+
+	client := NewNoiseTCPTransport(nil, nil, nil)
+	start := time.Now()
+	_, err = client.Dial(ctx, ServiceEndpoint{TCPAddr: ln.Addr().String(), PublicKey: serverPub})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected dial to fail after context cancellation")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled error, got %v", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("expected canceled handshake to fail promptly, elapsed=%s", elapsed)
+	}
+
+	select {
+	case conn := <-accepted:
+		_ = conn.Close()
+	default:
+	}
+}
+
+func TestNoiseDialHandshakeHonorsContextDeadline(t *testing.T) {
+	_, serverPub := GenerateKeypair()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		accepted <- conn
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+
+	client := NewNoiseTCPTransport(nil, nil, nil)
+	start := time.Now()
+	_, err = client.Dial(ctx, ServiceEndpoint{TCPAddr: ln.Addr().String(), PublicKey: serverPub})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected dial to fail after context deadline")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline exceeded, got %v", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("expected deadline-bounded handshake to fail promptly, elapsed=%s", elapsed)
+	}
+
+	select {
+	case conn := <-accepted:
+		_ = conn.Close()
+	default:
 	}
 }
 

@@ -2,12 +2,14 @@ package sdk
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -279,6 +281,39 @@ func TestRegistryClientWatchClearsDeadlineAfterAck(t *testing.T) {
 	case <-serverDone:
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("timeout waiting for watch server goroutine to exit")
+	}
+}
+
+type singleChunkReader struct {
+	data      []byte
+	readCalls int
+}
+
+func (r *singleChunkReader) Read(p []byte) (int, error) {
+	r.readCalls++
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
+func TestReadRegistryMessageRejectsOversizedFrameBeforeBodyRead(t *testing.T) {
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(maxRegistryMessageSize+1))
+
+	reader := &singleChunkReader{data: append([]byte(nil), hdr[:]...)}
+	var reply controlReply
+	err := readRegistryMessage(reader, &reply)
+	if err == nil {
+		t.Fatal("expected oversized frame error")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum size") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reader.readCalls != 1 {
+		t.Fatalf("expected only header read before rejecting frame, got %d reads", reader.readCalls)
 	}
 }
 
