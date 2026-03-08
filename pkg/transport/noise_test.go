@@ -146,13 +146,11 @@ func TestNoiseDialWithWrongKeyRejected(t *testing.T) {
 	defer cancel()
 
 	serverPriv, _ := GenerateKeypair()
-	_, serverPub := GenerateKeypair()
 	// Ensure responder has a consistent keypair.
-	derivedServerPub, err := DerivePublicKey(serverPriv)
+	serverPub, err := DerivePublicKey(serverPriv)
 	if err != nil {
 		t.Fatalf("DerivePublicKey() error = %v", err)
 	}
-	serverPub = derivedServerPub
 
 	server := NewNoiseTCPTransport(serverPriv, serverPub, nil)
 	ln, err := server.Listen(ctx, "127.0.0.1:0")

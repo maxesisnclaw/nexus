@@ -843,6 +843,41 @@ func TestServeConnTimeout(t *testing.T) {
 	}
 }
 
+func TestServeConnWriteTimeout(t *testing.T) {
+	client, err := New(Config{
+		Name:         "svc",
+		UDSAddr:      testSocketPath(t, "serve-write-timeout"),
+		ServeTimeout: 40 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer client.Close()
+
+	client.Handle("ok", func(req *Request) (*Response, error) {
+		return &Response{Payload: req.Payload}, nil
+	})
+
+	conn := newWriteBlockingConn()
+	done := make(chan struct{})
+	go func() {
+		client.serveConn(conn)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("serveConn() did not return on write timeout")
+	}
+	if !conn.isClosed() {
+		t.Fatal("expected connection to be closed after write timeout")
+	}
+	if !conn.sawWriteDeadline() {
+		t.Fatal("expected write deadline to be set before send")
+	}
+}
+
 func TestCloseUsesSyncOnce(t *testing.T) {
 	client, err := New(Config{Name: "svc", UDSAddr: testSocketPath(t, "close-once")})
 	if err != nil {
@@ -1790,6 +1825,97 @@ func (b *blockingConn) SetReadDeadline(t time.Time) error {
 }
 
 func (b *blockingConn) SetWriteDeadline(time.Time) error {
+	return nil
+}
+
+type writeBlockingConn struct {
+	closed              chan struct{}
+	closeOnce           sync.Once
+	mu                  sync.Mutex
+	writeDeadline       time.Time
+	recvDone            bool
+	writeDeadlineWasSet bool
+}
+
+func newWriteBlockingConn() *writeBlockingConn {
+	return &writeBlockingConn{closed: make(chan struct{})}
+}
+
+func (b *writeBlockingConn) Send(*transport.Message) error {
+	b.mu.Lock()
+	deadline := b.writeDeadline
+	b.mu.Unlock()
+
+	if deadline.IsZero() {
+		<-b.closed
+		return io.EOF
+	}
+
+	wait := time.Until(deadline)
+	if wait <= 0 {
+		return os.ErrDeadlineExceeded
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-b.closed:
+		return io.EOF
+	case <-timer.C:
+		return os.ErrDeadlineExceeded
+	}
+}
+
+func (b *writeBlockingConn) Recv() (*transport.Message, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.recvDone {
+		b.recvDone = true
+		return &transport.Message{Method: "ok", Payload: []byte("v")}, nil
+	}
+	return nil, io.EOF
+}
+
+func (b *writeBlockingConn) SendFd(int, []byte) error {
+	return transport.ErrFDUnsupported
+}
+
+func (b *writeBlockingConn) RecvFd() (int, []byte, error) {
+	return -1, nil, transport.ErrFDUnsupported
+}
+
+func (b *writeBlockingConn) Close() error {
+	b.closeOnce.Do(func() {
+		close(b.closed)
+	})
+	return nil
+}
+
+func (b *writeBlockingConn) isClosed() bool {
+	select {
+	case <-b.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+func (b *writeBlockingConn) sawWriteDeadline() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.writeDeadlineWasSet
+}
+
+func (b *writeBlockingConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+
+func (b *writeBlockingConn) SetWriteDeadline(t time.Time) error {
+	b.mu.Lock()
+	if !t.IsZero() {
+		b.writeDeadlineWasSet = true
+	}
+	b.writeDeadline = t
+	b.mu.Unlock()
 	return nil
 }
 

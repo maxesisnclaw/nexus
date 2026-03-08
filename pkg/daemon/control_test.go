@@ -2,12 +2,14 @@ package daemon
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -360,5 +362,38 @@ func TestControlSessionExtendReadDeadlinePolicy(t *testing.T) {
 	}
 	if !conn.lastReadDeadline.IsZero() {
 		t.Fatalf("expected zero read deadline for watch session, got %v", conn.lastReadDeadline)
+	}
+}
+
+type singleChunkReader struct {
+	data      []byte
+	readCalls int
+}
+
+func (r *singleChunkReader) Read(p []byte) (int, error) {
+	r.readCalls++
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
+func TestReadControlMessageRejectsOversizedFrameBeforeBodyRead(t *testing.T) {
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(maxControlMessageSize+1))
+
+	reader := &singleChunkReader{data: append([]byte(nil), hdr[:]...)}
+	var req controlRequest
+	err := readControlMessage(reader, &req)
+	if err == nil {
+		t.Fatal("expected oversized frame error")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum size") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reader.readCalls != 1 {
+		t.Fatalf("expected only header read before rejecting frame, got %d reads", reader.readCalls)
 	}
 }

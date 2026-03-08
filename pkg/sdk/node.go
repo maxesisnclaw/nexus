@@ -1000,7 +1000,7 @@ func (c *Node) serveConn(conn transport.Conn) {
 		}
 		req := &Request{Method: msg.Method, Payload: msg.Payload, Headers: msg.Headers}
 		if msg.Method == fdCallMethod {
-			if err := conn.Send(&transport.Message{Method: fdCallMethod, Headers: map[string]string{fdReadyKey: "1"}}); err != nil {
+			if err := c.sendWithTimeout(conn, &transport.Message{Method: fdCallMethod, Headers: map[string]string{fdReadyKey: "1"}}); err != nil {
 				return
 			}
 			if c.cfg.ServeTimeout > 0 {
@@ -1009,7 +1009,7 @@ func (c *Node) serveConn(conn transport.Conn) {
 			fd, _, err := conn.RecvFd()
 			_ = conn.SetReadDeadline(time.Time{})
 			if err != nil {
-				if err := conn.Send(&transport.Message{Headers: map[string]string{"error": err.Error()}}); err != nil {
+				if err := c.sendWithTimeout(conn, &transport.Message{Headers: map[string]string{"error": err.Error()}}); err != nil {
 					c.logger.Debug("send failed", "err", err)
 					return
 				}
@@ -1018,7 +1018,7 @@ func (c *Node) serveConn(conn transport.Conn) {
 			data, err := transport.ReadFDAll(fd, 64<<20) // 64 MiB, matches msgpack transport limit
 			_ = syscall.Close(fd)
 			if err != nil {
-				if err := conn.Send(&transport.Message{Headers: map[string]string{"error": err.Error()}}); err != nil {
+				if err := c.sendWithTimeout(conn, &transport.Message{Headers: map[string]string{"error": err.Error()}}); err != nil {
 					c.logger.Debug("send failed", "err", err)
 					return
 				}
@@ -1033,7 +1033,7 @@ func (c *Node) serveConn(conn transport.Conn) {
 
 		if c.cfg.AuthFunc != nil {
 			if err := c.cfg.AuthFunc(req); err != nil {
-				if err := conn.Send(&transport.Message{Headers: map[string]string{"error": err.Error()}}); err != nil {
+				if err := c.sendWithTimeout(conn, &transport.Message{Headers: map[string]string{"error": err.Error()}}); err != nil {
 					c.logger.Debug("send failed", "err", err)
 					return
 				}
@@ -1043,13 +1043,13 @@ func (c *Node) serveConn(conn transport.Conn) {
 
 		resp, err := c.dispatch(req)
 		if err != nil {
-			if err := conn.Send(&transport.Message{Headers: map[string]string{"error": err.Error()}}); err != nil {
+			if err := c.sendWithTimeout(conn, &transport.Message{Headers: map[string]string{"error": err.Error()}}); err != nil {
 				c.logger.Debug("send failed", "err", err)
 				return
 			}
 			continue
 		}
-		if err := conn.Send(&transport.Message{Method: req.Method, Payload: resp.Payload, Headers: resp.Headers}); err != nil {
+		if err := c.sendWithTimeout(conn, &transport.Message{Method: req.Method, Payload: resp.Payload, Headers: resp.Headers}); err != nil {
 			c.logger.Debug("send failed", "err", err)
 			return
 		}
@@ -1081,6 +1081,32 @@ func (c *Node) recvWithTimeout(conn transport.Conn) (*transport.Message, error) 
 		return nil, err
 	}
 	return msg, nil
+}
+
+func (c *Node) sendWithTimeout(conn transport.Conn, msg *transport.Message) error {
+	if c.cfg.ServeTimeout <= 0 {
+		return conn.Send(msg)
+	}
+
+	deadline := time.Now().Add(c.cfg.ServeTimeout)
+	if err := conn.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+	defer func() {
+		_ = conn.SetWriteDeadline(time.Time{})
+	}()
+
+	if err := conn.Send(msg); err != nil {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return errors.New("send timeout")
+		}
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			return errors.New("send timeout")
+		}
+		return err
+	}
+	return nil
 }
 
 func (c *Node) dispatch(req *Request) (resp *Response, err error) {

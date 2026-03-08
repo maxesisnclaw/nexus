@@ -17,7 +17,9 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
-const maxControlMessageSize = 64 * 1024 * 1024
+// Control-plane messages are expected to stay small. Keep a strict cap so one
+// connection cannot force large frame allocations.
+const maxControlMessageSize = 1 * 1024 * 1024
 const maxControlConns = 64
 const controlReadTimeout = 5 * time.Minute
 
