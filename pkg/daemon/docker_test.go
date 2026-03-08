@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -123,6 +124,93 @@ func TestDockerCLIStopRoundsUpSubSecondGrace(t *testing.T) {
 	if !strings.Contains(string(data), "stop --time 1 nexus-svc-1") {
 		t.Fatalf("expected stop timeout rounded up to 1 second, got %s", string(data))
 	}
+}
+
+func TestDockerRunArgsOrderAndFields(t *testing.T) {
+	proc := &ManagedProcess{
+		ID:      "svc-1",
+		Service: "svc",
+		Spec: config.ServiceSpec{
+			Runtime:       "docker",
+			Image:         "repo/test:latest",
+			Args:          []string{"--ignored-by-args-field"},
+			Env:           map[string]string{"BETA": "2", "ALPHA": "1"},
+			Volumes:       []string{"/host1:/container1", "/host2:/container2"},
+			Ports:         []string{"8080:80", "8443:443/tcp"},
+			CapAdd:        []string{"NET_ADMIN"},
+			CapDrop:       []string{"ALL"},
+			DockerNetwork: "bridge",
+			ExtraArgs:     []string{"--restart", "always"},
+			Network:       "dual",
+		},
+		Args: []string{"--mode", "test"},
+	}
+
+	got := dockerRunArgs(proc, "nexus-svc-1")
+	want := []string{
+		"run", "-d", "--name", "nexus-svc-1",
+		"--network", "bridge",
+		"-e", "ALPHA=1",
+		"-e", "BETA=2",
+		"-v", "/host1:/container1",
+		"-v", "/host2:/container2",
+		"-p", "8080:80",
+		"-p", "8443:443/tcp",
+		"--cap-add", "NET_ADMIN",
+		"--cap-drop", "ALL",
+		"-v", "/run/nexus:/run/nexus",
+		"--restart", "always",
+		"repo/test:latest",
+		"--mode", "test",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("dockerRunArgs() mismatch\nwant: %#v\ngot:  %#v", want, got)
+	}
+}
+
+func TestBuildBinaryCommandUsesWorkDirAndMergedEnv(t *testing.T) {
+	spec := config.ServiceSpec{
+		Name:    "svc",
+		Runtime: "binary",
+		Binary:  "/bin/echo",
+		WorkDir: "/tmp",
+		Env: map[string]string{
+			"NEXUS_PHASE1_TEST_VAR": "value-1",
+			"PATH":                  "/tmp/nexus-path-override",
+		},
+	}
+	cmd := buildBinaryCommand(spec, []string{"hello"})
+	if cmd.Dir != "/tmp" {
+		t.Fatalf("unexpected cmd.Dir: %q", cmd.Dir)
+	}
+	if got := lookupEnv(cmd.Env, "NEXUS_PHASE1_TEST_VAR"); got != "value-1" {
+		t.Fatalf("unexpected merged env value: %q", got)
+	}
+	if got := lookupEnv(cmd.Env, "PATH"); got != "/tmp/nexus-path-override" {
+		t.Fatalf("expected PATH override, got %q", got)
+	}
+}
+
+func TestBuildBinaryCommandDefaultsWorkDirToBinaryDir(t *testing.T) {
+	spec := config.ServiceSpec{
+		Name:    "svc",
+		Runtime: "binary",
+		Binary:  "/usr/local/bin/example",
+	}
+	cmd := buildBinaryCommand(spec, []string{"hello"})
+	if cmd.Dir != "/usr/local/bin" {
+		t.Fatalf("unexpected default cmd.Dir: %q", cmd.Dir)
+	}
+}
+
+func lookupEnv(env []string, key string) string {
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			return strings.TrimPrefix(entry, prefix)
+		}
+	}
+	return ""
 }
 
 func stubExecCommandContext(recordPath, failSubcommand string) func() {

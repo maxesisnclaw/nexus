@@ -44,7 +44,7 @@ func TestIntegrationServeAndCallWithMemfd(t *testing.T) {
 	defer server.Close()
 	waitForService(t, reg, "processor", 1)
 
-	client, err := New(Config{
+	caller, err := New(Config{
 		Name:                  "caller",
 		ID:                    "caller-1",
 		Registry:              reg,
@@ -53,12 +53,12 @@ func TestIntegrationServeAndCallWithMemfd(t *testing.T) {
 		RetryBackoff:          10 * time.Millisecond,
 	})
 	if err != nil {
-		t.Fatalf("New(client) error = %v", err)
+		t.Fatalf("New(caller) error = %v", err)
 	}
-	defer client.Close()
+	defer caller.Close()
 
 	payload := bytes.Repeat([]byte("z"), 1<<20)
-	resp, err := client.CallWithData("processor", "echo", payload)
+	resp, err := caller.CallWithData("processor", "echo", payload)
 	if err != nil {
 		t.Fatalf("CallWithData() error = %v", err)
 	}

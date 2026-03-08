@@ -88,6 +88,9 @@ func NewDiscovery(registry *Registry) *Discovery {
 func (d *Discovery) Pick(name string) (ServiceInstance, error) {
 	items := d.registry.Lookup(name)
 	if len(items) == 0 {
+		d.mu.Lock()
+		delete(d.offset, name)
+		d.mu.Unlock()
 		return ServiceInstance{}, fmt.Errorf("service %q not found", name)
 	}
 	d.mu.Lock()
@@ -101,6 +104,9 @@ func (d *Discovery) Pick(name string) (ServiceInstance, error) {
 func (d *Discovery) PickByCapability(capability string) (ServiceInstance, error) {
 	items := d.registry.LookupByCapability(capability)
 	if len(items) == 0 {
+		d.mu.Lock()
+		delete(d.offset, capability)
+		d.mu.Unlock()
 		return ServiceInstance{}, fmt.Errorf("capability %q not found", capability)
 	}
 	d.mu.Lock()

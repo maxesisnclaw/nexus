@@ -1,10 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"log/slog"
+	"net"
 	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/maxesisn/nexus/pkg/config"
@@ -238,4 +244,220 @@ func TestRunStopFailure(t *testing.T) {
 	if stub.stopCalls != 1 {
 		t.Fatalf("Stop() calls = %d, want 1", stub.stopCalls)
 	}
+}
+
+func TestRunValidateValidConfig(t *testing.T) {
+	configPath := writeTempConfig(t, `
+[daemon]
+socket = "/tmp/nexus.sock"
+
+[[service]]
+name = "api"
+type = "singleton"
+runtime = "binary"
+binary = "/bin/true"
+
+[[service]]
+name = "worker"
+type = "singleton"
+runtime = "binary"
+binary = "/bin/true"
+depends_on = ["api"]
+`)
+
+	code, out, _ := runWithCapturedOutput(t, []string{"validate", "-config", configPath})
+	if code != 0 {
+		t.Fatalf("run(validate) code = %d, want 0", code)
+	}
+	if !strings.Contains(out, "config valid") {
+		t.Fatalf("validate output missing success message: %q", out)
+	}
+}
+
+func TestRunValidateInvalidConfig(t *testing.T) {
+	configPath := writeTempConfig(t, `
+[daemon]
+socket = "/tmp/nexus.sock"
+
+[[service]]
+type = "singleton"
+runtime = "binary"
+binary = "/bin/true"
+`)
+
+	code, out, _ := runWithCapturedOutput(t, []string{"validate", "-config", configPath})
+	if code != 1 {
+		t.Fatalf("run(validate) code = %d, want 1", code)
+	}
+	if !strings.Contains(out, "config invalid") {
+		t.Fatalf("validate output missing error message: %q", out)
+	}
+}
+
+func TestRunValidateCircularDependency(t *testing.T) {
+	configPath := writeTempConfig(t, `
+[daemon]
+socket = "/tmp/nexus.sock"
+
+[[service]]
+name = "api"
+type = "singleton"
+runtime = "binary"
+binary = "/bin/true"
+depends_on = ["worker"]
+
+[[service]]
+name = "worker"
+type = "singleton"
+runtime = "binary"
+binary = "/bin/true"
+depends_on = ["api"]
+`)
+
+	code, out, _ := runWithCapturedOutput(t, []string{"validate", "-config", configPath})
+	if code != 1 {
+		t.Fatalf("run(validate) code = %d, want 1", code)
+	}
+	if !strings.Contains(strings.ToLower(out), "circular") {
+		t.Fatalf("validate output missing circular dependency message: %q", out)
+	}
+}
+
+func TestRunKeygen(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "nexus.key")
+
+	code, out, _ := runWithCapturedOutput(t, []string{"keygen", "-out", outPath})
+	if code != 0 {
+		t.Fatalf("run(keygen) code = %d, want 0", code)
+	}
+	if !strings.Contains(out, "public key:") {
+		t.Fatalf("keygen output missing public key: %q", out)
+	}
+	if !strings.Contains(out, "private key written to: "+outPath) {
+		t.Fatalf("keygen output missing private key path: %q", out)
+	}
+
+	matches := regexp.MustCompile(`public key:\s*([0-9a-f]{64})`).FindStringSubmatch(out)
+	if len(matches) != 2 {
+		t.Fatalf("public key format mismatch: %q", out)
+	}
+	if _, err := hex.DecodeString(matches[1]); err != nil {
+		t.Fatalf("public key is not valid hex: %v", err)
+	}
+
+	info, err := os.Stat(outPath)
+	if err != nil {
+		t.Fatalf("stat private key file: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("private key file mode = %o, want 600", info.Mode().Perm())
+	}
+
+	content, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read private key file: %v", err)
+	}
+	raw := strings.TrimSpace(string(content))
+	if len(raw) != 64 {
+		t.Fatalf("private key length = %d, want 64 hex chars", len(raw))
+	}
+	if _, err := hex.DecodeString(raw); err != nil {
+		t.Fatalf("private key is not valid hex: %v", err)
+	}
+}
+
+func TestRunStatusNoDaemon(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "registry.sock")
+
+	code, _, errOut := runWithCapturedOutput(t, []string{"status", "-socket", socketPath})
+	if code != 1 {
+		t.Fatalf("run(status) code = %d, want 1", code)
+	}
+	if !strings.Contains(errOut, "status query failed") {
+		t.Fatalf("status stderr missing failure message: %q", errOut)
+	}
+}
+
+func TestRunStatusSuccess(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "registry.sock")
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	defer ln.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer conn.Close()
+
+		var req statusRequest
+		if err := readControlMessage(conn, &req); err != nil {
+			done <- err
+			return
+		}
+		if req.Cmd != "status" {
+			done <- errors.New("unexpected command")
+			return
+		}
+
+		resp := statusCommandResponse{
+			Services: []statusService{
+				{Name: "worker", ID: "worker-2", PID: 12347, Running: false},
+				{Name: "api", ID: "api-1", PID: 12345, Running: true},
+			},
+		}
+		done <- writeControlMessage(conn, resp)
+	}()
+
+	code, out, errOut := runWithCapturedOutput(t, []string{"status", "-socket", socketPath})
+	if code != 0 {
+		t.Fatalf("run(status) code = %d, want 0 (stderr=%q)", code, errOut)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("status test server failed: %v", err)
+	}
+
+	if !strings.Contains(out, "SERVICE") {
+		t.Fatalf("status output missing header: %q", out)
+	}
+	if !strings.Contains(out, "api-1") || !strings.Contains(out, "running") {
+		t.Fatalf("status output missing running row: %q", out)
+	}
+	if !strings.Contains(out, "worker-2") || !strings.Contains(out, "stopped") {
+		t.Fatalf("status output missing stopped row: %q", out)
+	}
+}
+
+func runWithCapturedOutput(t *testing.T, args []string) (int, string, string) {
+	t.Helper()
+
+	var outBuf bytes.Buffer
+	var errBuf bytes.Buffer
+
+	origOut := stdout
+	origErr := stderr
+	stdout = &outBuf
+	stderr = &errBuf
+	defer func() {
+		stdout = origOut
+		stderr = origErr
+	}()
+
+	code := run(args)
+	return code, outBuf.String(), errBuf.String()
+}
+
+func writeTempConfig(t *testing.T, content string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "nexus.toml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	return path
 }

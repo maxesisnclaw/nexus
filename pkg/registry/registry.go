@@ -26,6 +26,7 @@ type Registry struct {
 	reaperEvery time.Duration
 	ctx         context.Context
 	cancel      context.CancelFunc
+	wg          sync.WaitGroup
 }
 
 // New creates a registry using default heartbeat expiry settings.
@@ -50,6 +51,7 @@ func NewWithOptions(nodeID string, ttl time.Duration, reaperEvery time.Duration)
 		ctx:         ctx,
 		cancel:      cancel,
 	}
+	r.wg.Add(1)
 	go r.reapLoop(ttl)
 	return r
 }
@@ -62,6 +64,7 @@ func (r *Registry) NodeID() string {
 // Close stops internal loops.
 func (r *Registry) Close() {
 	r.cancel()
+	r.wg.Wait()
 
 	r.mu.Lock()
 	watchers := make([]*watcher, 0)
@@ -215,6 +218,8 @@ func deepCopyInstance(inst ServiceInstance) ServiceInstance {
 }
 
 func (r *Registry) reapLoop(defaultTTL time.Duration) {
+	defer r.wg.Done()
+
 	ticker := time.NewTicker(r.reaperEvery)
 	defer ticker.Stop()
 

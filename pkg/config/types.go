@@ -13,7 +13,7 @@ type Config struct {
 // DaemonConfig controls nexusd runtime behavior.
 type DaemonConfig struct {
 	// Socket is reserved for daemon UDS control-plane socket wiring.
-	// Current runtime does not consume this field yet.
+	// Current runtime uses this field for the daemon control socket.
 	Socket string `toml:"socket"`
 	// LogLevel configures daemon logging verbosity.
 	LogLevel string `toml:"log_level"`
@@ -21,18 +21,15 @@ type DaemonConfig struct {
 	HealthInterval Duration `toml:"health_interval"`
 	// ShutdownGrace is the graceful stop timeout before force kill.
 	ShutdownGrace Duration `toml:"shutdown_grace"`
-	// Peers is reserved for future remote daemon registry sync.
-	// Current runtime does not consume this field yet.
-	Peers []PeerConfig `toml:"peers"`
+	// Peer-based registry sync is planned for a future version.
 	// Listen is reserved for future daemon cross-node TCP listener wiring.
 	// Current runtime does not consume this field yet.
 	Listen string `toml:"listen"`
-}
-
-// PeerConfig describes another daemon node for registry sync.
-type PeerConfig struct {
-	// Addr is the peer daemon address.
-	Addr string `toml:"addr"`
+	// NoiseKeyFile is the path to the Noise Protocol static key file.
+	// If empty, encrypted TCP listener startup is refused.
+	NoiseKeyFile string `toml:"noise_key_file"`
+	// TrustedKeys lists trusted Noise server public keys in hex form.
+	TrustedKeys []string `toml:"trusted_keys"`
 }
 
 // ServiceSpec describes one managed service entry.
@@ -45,15 +42,29 @@ type ServiceSpec struct {
 	Runtime string `toml:"runtime"`
 	// Binary is the executable path for binary runtime.
 	Binary string `toml:"binary"`
+	// WorkDir is the working directory for binary runtime.
+	WorkDir string `toml:"work_dir"`
 	// Image is the container image for docker runtime.
 	Image string `toml:"image"`
 	// Args are default startup arguments.
 	Args []string `toml:"args"`
+	// Env contains environment variables for binary and docker runtimes.
+	Env map[string]string `toml:"env"`
 	// Volumes lists docker bind mounts.
 	Volumes []string `toml:"volumes"`
-	// DependsOn lists service names this service depends on. Reserved for future use; currently not enforced by the daemon.
+	// Ports lists docker port mappings like host:container or host:container/proto.
+	Ports []string `toml:"ports"`
+	// CapAdd lists Linux capabilities to add for docker runtime.
+	CapAdd []string `toml:"cap_add"`
+	// CapDrop lists Linux capabilities to drop for docker runtime.
+	CapDrop []string `toml:"cap_drop"`
+	// DockerNetwork sets docker --network mode.
+	DockerNetwork string `toml:"docker_network"`
+	// ExtraArgs appends raw docker run flags.
+	ExtraArgs []string `toml:"extra_args"`
+	// DependsOn lists service names this service depends on.
 	DependsOn []string `toml:"depends_on"`
-	// HealthCheck endpoint for liveness probing. Reserved for future use; currently not enforced by the daemon.
+	// HealthCheck endpoint for probe-based liveness checking.
 	HealthCheck string `toml:"health_check"`
 	// Network controls service transport exposure.
 	Network string `toml:"network"`

@@ -1,0 +1,151 @@
+# nexus.example.toml
+# Nexus v0.4 configuration example.
+# This file documents supported fields and typical values.
+
+[daemon]
+# Daemon control/registry socket (UDS).
+# Default: "/run/nexus/registry.sock"
+socket = "/run/nexus/registry.sock"
+
+# Daemon log level.
+# Values: "debug", "info", "warn", "error"
+# Default: "info"
+log_level = "info"
+
+# Health monitor interval.
+# Default: "5s"
+health_interval = "5s"
+
+# Grace period before SIGKILL during shutdown.
+# Default: "10s"
+shutdown_grace = "10s"
+
+# Optional Noise-encrypted TCP listener for cross-host communication.
+# Empty means disabled.
+listen = "127.0.0.1:7700"
+
+# Noise static private key file (hex-encoded 32-byte private key).
+# If the file does not exist, daemon can generate it.
+noise_key_file = "/etc/nexus/noise.key"
+
+# Trusted Noise responder public keys (hex strings).
+# Leave empty to trust keys supplied by endpoint metadata only.
+trusted_keys = [
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+]
+
+# ----------------------------------------------------------------------------
+# Service 1: gateway (binary, singleton)
+# ----------------------------------------------------------------------------
+[[service]]
+name = "gateway"
+
+# Type rules:
+# - singleton: instances must be empty
+# - worker: instances must be non-empty
+type = "singleton"
+
+# Runtime: "binary" or "docker"
+runtime = "binary"
+
+# Required for binary runtime.
+binary = "/opt/nexus/bin/gateway"
+
+# Optional binary working directory (absolute path).
+work_dir = "/opt/nexus"
+
+# Binary/container args.
+args = ["--config", "/etc/nexus/gateway.toml"]
+
+# Environment variables for binary/docker runtime.
+env = { GATEWAY_MODE = "prod", LOG_FORMAT = "json" }
+
+# Common fields
+network = "uds"        # uds | tcp | dual
+depends_on = []
+
+# Probe type 1: exec://
+health_check = "exec:///usr/bin/test -S /run/nexus/gateway.sock"
+
+# Docker-only fields (ignored for binary runtime; kept for schema completeness).
+image = ""
+volumes = []
+ports = []
+cap_add = []
+cap_drop = []
+docker_network = ""
+extra_args = []
+
+# singleton service should keep instances empty.
+instances = []
+
+# ----------------------------------------------------------------------------
+# Service 2: auth (binary, singleton) depends on gateway
+# ----------------------------------------------------------------------------
+[[service]]
+name = "auth"
+type = "singleton"
+runtime = "binary"
+binary = "/opt/nexus/bin/auth"
+work_dir = "/opt/nexus"
+args = ["--config", "/etc/nexus/auth.toml"]
+env = { AUTH_MODE = "strict" }
+network = "uds"
+
+# Dependency ordering example: auth starts after gateway.
+depends_on = ["gateway"]
+
+# Probe type 2: http://
+health_check = "http://127.0.0.1:8081/healthz"
+
+image = ""
+volumes = []
+ports = []
+cap_add = []
+cap_drop = []
+docker_network = ""
+extra_args = []
+instances = []
+
+# ----------------------------------------------------------------------------
+# Service 3: legacy-postproc (docker, worker) depends on auth
+# ----------------------------------------------------------------------------
+[[service]]
+name = "legacy-postproc"
+type = "worker"
+runtime = "docker"
+
+# Docker runtime required field.
+image = "registry.example.com/legacy/postproc:1.2.3"
+
+# Binary-only fields should stay empty for docker runtime.
+binary = ""
+work_dir = ""
+
+args = ["--serve"]
+env = { APP_MODE = "prod", FEATURE_FLAG = "on" }
+
+# Docker run options.
+volumes = [
+  "/opt/nexus/postproc:/app",
+  "/var/lib/nexus/cache:/cache",
+]
+ports = ["8080:80", "8443:443/tcp"]
+cap_add = ["NET_ADMIN"]
+cap_drop = ["ALL"]
+docker_network = "bridge"
+extra_args = ["--restart", "always", "--log-driver", "json-file"]
+
+network = "dual"
+
+# Dependency ordering example: worker starts after auth.
+depends_on = ["auth"]
+
+# Probe type 3: tcp://
+health_check = "tcp://127.0.0.1:18080"
+
+# worker service requires at least one instance.
+instances = [
+  { id = "legacy-postproc-vehicle", args = ["--profile", "vehicle"] },
+  { id = "legacy-postproc-person", args = ["--profile", "person"] },
+]

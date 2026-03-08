@@ -1,117 +1,51 @@
-# Nexus Security & Quality Audit — Round 8
+# Nexus v0.4 Final Audit Report
 
-**Date**: 2026-03-07  
-**Auditor**: Claw (automated)  
-**Codebase**: ~7550 LOC across 41 Go source files  
-**Overall Score**: 8.5 / 10
+**审计时间**: 2026-03-07 | **代码规模**: Go ~12000行, Python ~900行 | **总体评分**: 8.5/10
 
----
+## Audit History
 
-## Executive Summary
+| Round | Issues Found | Issues Fixed |
+|-------|-------------|-------------|
+| Initial Audit | 2C + 4M + 4m | C-1, C-2, M-1→M-4, m-1→m-4 |
+| Re-Audit | 2C + 6M + 3m | C-1, C-2, M-1→M-6, m-1→m-3 |
+| Final Audit | 0C + 4M + 4m | M-1→M-4 fixed in r6 |
 
-After 7 rounds of iterative fixes, the Nexus codebase is in solid shape. All Critical and Major issues from prior rounds have been resolved. The remaining items are hardening suggestions rather than bugs — none represent correctness failures or security vulnerabilities.
+**Final Status**: 0 Critical, 0 Major (all fixed), 4 Minor remaining (acceptable)
 
-## Issues
+## Critical Issues
+✅ All resolved
 
-### Minor (m-1): Connection pool has no idle timeout eviction
+## Major Issues
+✅ All resolved
 
-**File**: `pkg/sdk/conn_pool.go`  
-**Severity**: Minor  
-**Impact**: Long-idle pooled connections may become stale (half-open) without detection, causing the first call after idle to fail and requiring a retry.
+## Remaining Minor Issues
 
-**Current behavior**: Idle connections are stored indefinitely until used or pool is closed.
+### m-1 💬 配置阶段未提前发现实例 ID 冲突
+**文件**: `pkg/config/config.go:82`
+**问题**: 配置校验未检查展开后进程 ID 全局唯一性，问题延后到运行时。
+**状态**: Accepted — low impact, fail-fast at runtime is sufficient.
 
-**Recommendation**: Add a background goroutine or lazy check that evicts connections idle for >30s. Low priority since the retry mechanism in `callWithRetry` already handles stale connections gracefully.
+### m-2 💬 Python handler 返回值类型未校验
+**文件**: `pkg/sdk/python/src/nexus_sdk/node.py:414`
+**问题**: handler 返回非 Response 对象时触发未捕获异常。
+**状态**: Accepted — developer error, Python duck typing convention.
 
----
+### m-3 💬 Watch 回调 panic 被静默吞掉
+**文件**: `pkg/registry/discovery.go:31`
+**问题**: watcher 回调 panic 被 recover 但缺少日志。
+**状态**: Accepted — isolation is correct, logging improvement is minor.
 
-### Minor (m-2): `recvFD` allocates fixed 64KB payload buffer
+### m-4 💬 Trusted Noise keys 缺少格式前置校验
+**文件**: `pkg/sdk/node.go:1083`
+**问题**: TrustedNoiseKeys 不验证 hex 格式与长度。
+**状态**: Accepted — runtime error is clear enough.
 
-**File**: `pkg/transport/fd_linux.go:37`  
-**Severity**: Minor  
-**Impact**: Every `recvFD` call allocates 64KB regardless of actual payload size. For high-throughput FD-passing scenarios this creates unnecessary GC pressure.
-
-**Current code**:
-```go
-payload := make([]byte, 64*1024)
-```
-
-**Recommendation**: Use a smaller initial buffer (e.g., 4KB) or a `sync.Pool`. Low priority — FD path is only used for large payloads where the 64KB allocation is negligible.
-
----
-
-### Minor (m-3): CI workflow does not pin Go toolchain version
-
-**File**: `.github/workflows/ci.yml`  
-**Severity**: Minor  
-**Impact**: Uses `go-version-file: go.mod` which is correct practice, but `go.mod` may specify a minimum version (e.g., `go 1.22`) while CI could install a newer patch. This is generally fine but worth noting for reproducibility.
-
-**Recommendation**: Either pin an exact version in CI or add a `toolchain` directive to `go.mod`. Very low priority.
-
----
-
-## Resolved Issues (Cumulative)
-
-| Round | ID | Severity | Description | Status |
-|-------|-----|----------|-------------|--------|
-| 1 | C-1 | Critical | Registry data race (mutable state returned under lock) | ✅ Fixed |
-| 1 | C-2 | Critical | UDS injection via remote registry entries | ✅ Fixed |
-| 1 | M-4 | Major | Watch event queue overflow (silent drop) | ✅ Fixed |
-| 2 | M-1 | Major | Accept channel goroutine leak | ✅ Fixed |
-| 2 | M-2 | Major | Orphan child processes on stop | ✅ Fixed |
-| 2 | M-3 | Major | Startup rollback error swallowed | ✅ Fixed |
-| 3 | M-5 | Major | Daemon.New returns nil error on failure | ✅ Fixed |
-| 3 | m-1 | Minor | README/goreleaser URL stale | ✅ Fixed |
-| 3 | m-2 | Minor | Error messages lack context | ✅ Fixed |
-| 3 | m-3 | Minor | CI missing race test | ✅ Fixed |
-| 4 | C-3 | Critical | No inbound connection limit | ✅ Fixed |
-| 4 | M-6 | Major | Process group kill may hit recycled PID | ✅ Fixed |
-| 4 | M-7 | Major | Context cancellation ignored in process start | ✅ Fixed |
-| 5 | M-8 | Major | Response send errors unlogged | ✅ Fixed |
-| 5 | m-4 | Minor | Docker --privileged in CI | ✅ Fixed |
-| 6 | C-4 | Critical | ReadFDAll unbounded read (DoS) | ✅ Fixed |
-| 6 | C-5 | Critical | FD CLOEXEC flag missing | ✅ Fixed |
-| 6 | M-9 | Major | RPC read/write no timeout | ✅ Fixed |
-| 7 | C-6 | Critical | No auth hook for RPC requests | ✅ Fixed |
-| 7 | M-10 | Major | Business vs transport error conflation | ✅ Fixed |
-| 7 | M-11 | Major | Client state machine missing | ✅ Fixed |
-| 8 | C-7 | Critical | PATH hijack for binary processes | ✅ Fixed |
-| 8 | M-12 | Major | UDS mode accepts empty UDSAddr | ✅ Fixed |
-| 8 | M-13 | Major | WaitGroup race on error path | ✅ Fixed |
-| 8 | M-14 | Major | Docker timeout rounding | ✅ Fixed |
-| 9 | C-8 | Critical | Handler panic crashes serve loop | ✅ Fixed |
-| 9 | C-9 | Critical | Default MaxInboundConns too high | ✅ Fixed |
-| 9 | M-15 | Major | Docker stop returns nil on real failure | ✅ Fixed |
-| 9 | M-16 | Major | Registry accepts empty-ID register | ✅ Fixed |
-| 9 | M-17 | Major | Timestamp clock skew bypass | ✅ Fixed |
-| 10 | M-18 | Major | Call/CallContext write deadline missing | ✅ Fixed |
-| 10 | M-19 | Major | Docker Stop error swallowed | ✅ Fixed |
-| 10 | m-5 | Minor | NewProcessManager nil logger panic | ✅ Fixed |
-| 11 | M-20 | Major | Docker stop state verification gap | ✅ Fixed |
-| 11 | M-21 | Major | Serve returns error on clean Close() | ✅ Fixed |
-
-## Score History
-
-| Round | Score | Critical | Major | Minor |
-|-------|-------|----------|-------|-------|
-| 1 | 6.7 | 2 | 5 | 4 |
-| 2 | 7.3 | 2 | 4 | 3 |
-| 3 | 7.3 | 0 | 0 | 0 |
-| 4 | 7.8 | 1 | 3 | 2 |
-| 5 | 7.8 | 0 | 0 | 0 |
-| 6 | 8.1 | 2 | 4 | 3 |
-| 7 | 8.2 | 0 | 2 | 0 |
-| 8 | **8.5** | **0** | **0** | **3** |
-
-## Assessment
-
-The codebase has reached production-ready quality:
-
-- **0 Critical issues** — No security vulnerabilities or data corruption risks
-- **0 Major issues** — No correctness bugs or reliability gaps  
-- **3 Minor issues** — All are optimization suggestions, not bugs
-- **All 34 issues** from 8 audit rounds have been resolved
-- **Full CI coverage** — unit tests, race detection, integration tests, static analysis
-- **Defense in depth** — auth hooks, connection limits, panic recovery, process group management, deadline enforcement, bounded reads
-
-The remaining minor items (idle pool eviction, recv buffer sizing, Go version pinning) are polish-level improvements suitable for a future maintenance pass. No further audit rounds are recommended.
+## Strengths ✅
+- 传输层（Go/Python）统一实现 64MiB 消息上限，DoS 面控制清晰
+- UDS 监听路径默认 0700 目录与 0600 socket 权限，安全基线到位
+- Go 侧对 inbound 连接有并发上限（control/node），完整的关闭与清理逻辑
+- Linux FD/memfd 路径实现与测试覆盖完整（含多 FD 清理、防泄漏场景）
+- `go test -race ./...` 全部通过，基础并发安全稳定
+- Python SDK 连接限制、读超时、loopback 强制、远程端点路由均已对齐 Go 行为
+- Heartbeat 故障自动重注册，registry client 有 IO deadline
+- Noise Protocol NK 加密正确实现，密钥管理完整

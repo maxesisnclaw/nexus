@@ -3,9 +3,11 @@ package sdk
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -103,6 +105,30 @@ func TestNewValidationAndDefaults(t *testing.T) {
 			client.cfg.LargePayloadThreshold,
 			client.cfg.RetryBackoff,
 		)
+	}
+	if client.cfg.RegisterRetries != 3 {
+		t.Fatalf("expected default RegisterRetries=3, got %d", client.cfg.RegisterRetries)
+	}
+}
+
+func TestRoundRobinDiscoveryPickCleansOffsetOnMissingService(t *testing.T) {
+	reg := registry.New("node-a")
+	defer reg.Close()
+
+	discovery := newRoundRobinDiscovery(&localRegistryBackend{reg: reg})
+	discovery.mu.Lock()
+	discovery.offset["missing"] = 7
+	discovery.mu.Unlock()
+
+	if _, err := discovery.Pick("missing"); err == nil {
+		t.Fatal("expected Pick() to fail for missing service")
+	}
+
+	discovery.mu.Lock()
+	_, ok := discovery.offset["missing"]
+	discovery.mu.Unlock()
+	if ok {
+		t.Fatal("expected stale offset entry to be removed after missing lookup")
 	}
 }
 
@@ -635,14 +661,79 @@ func TestEndpointFromInstanceErrors(t *testing.T) {
 	}
 }
 
+func TestEndpointFromInstanceParsesNoisePublicKeyMetadata(t *testing.T) {
+	_, pub := transport.GenerateKeypair()
+	ep, err := endpointFromInstance(registry.ServiceInstance{
+		Name: "svc",
+		ID:   "svc-1",
+		Node: "node-b",
+		Endpoints: []registry.Endpoint{
+			{Type: registry.EndpointTCP, Addr: "127.0.0.1:9000"},
+		},
+		Metadata: map[string]string{
+			tcpNoisePublicKeyMetadata: hex.EncodeToString(pub),
+		},
+	}, "node-a")
+	if err != nil {
+		t.Fatalf("endpointFromInstance() error = %v", err)
+	}
+	if !bytes.Equal(ep.PublicKey, pub) {
+		t.Fatalf("unexpected parsed noise public key: got=%x want=%x", ep.PublicKey, pub)
+	}
+}
+
 func TestDispatchHandlerNotFound(t *testing.T) {
-	client, err := New(Config{Name: "svc", UDSAddr: filepath.Join(t.TempDir(), "svc.sock")})
+	node, err := New(Config{Name: "svc", UDSAddr: filepath.Join(t.TempDir(), "svc.sock")})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer client.Close()
-	if _, err := client.dispatch(&Request{Method: "missing"}); err == nil {
+	defer node.Close()
+	if _, err := node.dispatch(&Request{Method: "missing"}); err == nil {
 		t.Fatal("expected missing handler error")
+	} else if !strings.Contains(err.Error(), `dispatch method "missing"`) {
+		t.Fatalf("expected method name in dispatch error, got %v", err)
+	}
+}
+
+func TestHandleFuncRegistersPlainFunction(t *testing.T) {
+	node, err := New(Config{Name: "svc", UDSAddr: filepath.Join(t.TempDir(), "svc.sock")})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer node.Close()
+	node.HandleFunc("echo", func(req *Request) (*Response, error) {
+		return &Response{Payload: append(req.Payload, '!')}, nil
+	})
+
+	resp, err := node.dispatch(&Request{Method: "echo", Payload: []byte("ok")})
+	if err != nil {
+		t.Fatalf("dispatch() error = %v", err)
+	}
+	if string(resp.Payload) != "ok!" {
+		t.Fatalf("unexpected payload: %q", string(resp.Payload))
+	}
+}
+
+func TestCallIncludesNodeServiceAndMethodContext(t *testing.T) {
+	node, err := New(Config{Name: "caller", ID: "caller-1"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer node.Close()
+
+	_, err = node.Call("missing-svc", "echo", []byte("hello"))
+	if err == nil {
+		t.Fatal("expected call error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, `node caller/caller-1`) {
+		t.Fatalf("expected node context, got %v", err)
+	}
+	if !strings.Contains(msg, `service="missing-svc"`) {
+		t.Fatalf("expected service context, got %v", err)
+	}
+	if !strings.Contains(msg, `method="echo"`) {
+		t.Fatalf("expected method context, got %v", err)
 	}
 }
 
@@ -899,10 +990,12 @@ func TestListenTCPAndDualRegister(t *testing.T) {
 		t.Fatalf("New(dual) error = %v", err)
 	}
 	defer dual.Close()
-	dual.register([]registry.Endpoint{
+	if err := dual.register(context.Background(), []registry.Endpoint{
 		{Type: registry.EndpointUDS, Addr: dual.cfg.UDSAddr},
 		{Type: registry.EndpointTCP, Addr: dual.cfg.TCPAddr},
-	})
+	}); err != nil {
+		t.Fatalf("register() error = %v", err)
+	}
 	items := reg.Lookup("svc")
 	if len(items) == 0 {
 		t.Fatal("expected registered dual endpoint service")
@@ -1035,6 +1128,293 @@ func TestServeDualNetworkRegistersBoundTCPAndRoutesRemoteOverTCP(t *testing.T) {
 	}
 }
 
+func TestServeTCPNoiseRegistersMetadataAndRoutesCalls(t *testing.T) {
+	reg := registry.New("node-a")
+	defer reg.Close()
+
+	noisePriv, noisePub := transport.GenerateKeypair()
+	server, err := New(Config{
+		Name:            "svc-noise",
+		ID:              "svc-noise-1",
+		Registry:        reg,
+		Network:         "tcp",
+		TCPAddr:         "127.0.0.1:0",
+		NoisePrivateKey: noisePriv,
+		NoisePublicKey:  noisePub,
+	})
+	if err != nil {
+		t.Fatalf("New(server) error = %v", err)
+	}
+	defer server.Close()
+	server.Handle("echo", func(req *Request) (*Response, error) {
+		return &Response{Payload: append(req.Payload, '!')}, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.Serve(ctx)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case err := <-serveErr:
+			if err != nil {
+				t.Fatalf("Serve() returned error: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for Serve() shutdown")
+		}
+	}()
+
+	waitForService(t, reg, "svc-noise", 1)
+	items := reg.Lookup("svc-noise")
+	if len(items) != 1 {
+		t.Fatalf("expected one service entry, got %+v", items)
+	}
+	if got := items[0].Metadata[tcpNoisePublicKeyMetadata]; got != hex.EncodeToString(noisePub) {
+		t.Fatalf("unexpected registered noise public key metadata: %q", got)
+	}
+
+	caller, err := New(Config{
+		Name:           "caller-noise",
+		ID:             "caller-noise-1",
+		Registry:       reg,
+		NoisePublicKey: noisePub, // enables Noise TCP dialer selection
+	})
+	if err != nil {
+		t.Fatalf("New(caller) error = %v", err)
+	}
+	defer caller.Close()
+
+	resp, err := caller.Call("svc-noise", "echo", []byte("ok"))
+	if err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if string(resp.Payload) != "ok!" {
+		t.Fatalf("unexpected response payload: %q", string(resp.Payload))
+	}
+}
+
+func TestServeReturnsRegistrationErrorAfterRetries(t *testing.T) {
+	node, err := New(Config{
+		Name:            "svc-register-fail",
+		ID:              "svc-register-fail-1",
+		UDSAddr:         testSocketPath(t, "register-fail"),
+		RegisterRetries: 3,
+		RetryBackoff:    time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer node.Close()
+
+	backend := &failingRegistryBackend{registerErr: errors.New("forced register failure")}
+	node.regAPI = backend
+	node.discovery = newRoundRobinDiscovery(backend)
+	node.ownsReg = false
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	err = node.Serve(ctx)
+	if err == nil {
+		t.Fatal("expected Serve() to fail when registration retries are exhausted")
+	}
+	if !strings.Contains(err.Error(), "register service instance") {
+		t.Fatalf("expected registration error context, got %v", err)
+	}
+	if got := backend.registerCalls.Load(); got != 3 {
+		t.Fatalf("expected 3 registration attempts, got %d", got)
+	}
+	if node.state != nodeNew {
+		t.Fatalf("expected node state reset to nodeNew on registration failure, got %d", node.state)
+	}
+}
+
+func TestHeartbeatLoopReregistersAfterConsecutiveFailures(t *testing.T) {
+	originalInterval := nodeHeartbeatInterval
+	nodeHeartbeatInterval = 5 * time.Millisecond
+	defer func() {
+		nodeHeartbeatInterval = originalInterval
+	}()
+
+	backend := &heartbeatRegistryBackend{
+		heartbeatResults: []bool{false, false, false, true},
+	}
+	node := &Node{
+		cfg: Config{
+			Name:            "svc-heartbeat",
+			ID:              "svc-heartbeat-1",
+			RegisterRetries: 1,
+			RetryBackoff:    time.Millisecond,
+		},
+		logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		regAPI:    backend,
+		heartbeat: make(chan struct{}),
+	}
+	endpoints := []registry.Endpoint{{Type: registry.EndpointUDS, Addr: "/tmp/svc-heartbeat.sock"}}
+	if err := node.register(context.Background(), endpoints); err != nil {
+		t.Fatalf("register() error = %v", err)
+	}
+
+	done := make(chan struct{})
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+	defer loopCancel()
+	go func() {
+		node.heartbeatLoop(loopCtx)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got := backend.registerCalls.Load(); got >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := backend.registerCalls.Load(); got != 2 {
+		t.Fatalf("expected re-registration after heartbeat failures, got register calls=%d", got)
+	}
+
+	loopCancel()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timeout waiting heartbeat loop to stop")
+	}
+
+	if got := node.heartbeatFailures.Load(); got != 0 {
+		t.Fatalf("expected heartbeat failure counter reset after re-registration, got %d", got)
+	}
+}
+
+func TestNoiseTrustedKeysRejectUntrustedRegistryKey(t *testing.T) {
+	reg := registry.New("node-a")
+	defer reg.Close()
+
+	noisePriv, noisePub := transport.GenerateKeypair()
+	server, err := New(Config{
+		Name:            "svc-noise-trusted",
+		ID:              "svc-noise-trusted-1",
+		Registry:        reg,
+		Network:         "tcp",
+		TCPAddr:         "127.0.0.1:0",
+		NoisePrivateKey: noisePriv,
+		NoisePublicKey:  noisePub,
+	})
+	if err != nil {
+		t.Fatalf("New(server) error = %v", err)
+	}
+	defer server.Close()
+	server.Handle("echo", func(req *Request) (*Response, error) {
+		return &Response{Payload: req.Payload}, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.Serve(ctx)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case err := <-serveErr:
+			if err != nil {
+				t.Fatalf("Serve() returned error: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for Serve() shutdown")
+		}
+	}()
+
+	waitForService(t, reg, "svc-noise-trusted", 1)
+	_, otherPub := transport.GenerateKeypair()
+	caller, err := New(Config{
+		Name:             "caller-noise-trusted",
+		ID:               "caller-noise-trusted-1",
+		Registry:         reg,
+		NoisePublicKey:   noisePub,
+		TrustedNoiseKeys: []string{hex.EncodeToString(otherPub)},
+	})
+	if err != nil {
+		t.Fatalf("New(caller) error = %v", err)
+	}
+	defer caller.Close()
+
+	if _, err := caller.Call("svc-noise-trusted", "echo", []byte("ok")); err == nil {
+		t.Fatal("expected call to fail for untrusted noise key")
+	} else if !strings.Contains(err.Error(), "not trusted") {
+		t.Fatalf("expected untrusted key error, got %v", err)
+	}
+}
+
+func TestNoiseWithoutTrustedKeysLogsWarningForRemoteTCP(t *testing.T) {
+	reg := registry.New("node-a")
+	defer reg.Close()
+
+	noisePriv, noisePub := transport.GenerateKeypair()
+	server, err := New(Config{
+		Name:            "svc-noise-warning",
+		ID:              "svc-noise-warning-1",
+		Registry:        reg,
+		Network:         "tcp",
+		TCPAddr:         "127.0.0.1:0",
+		NoisePrivateKey: noisePriv,
+		NoisePublicKey:  noisePub,
+	})
+	if err != nil {
+		t.Fatalf("New(server) error = %v", err)
+	}
+	defer server.Close()
+	server.Handle("echo", func(req *Request) (*Response, error) {
+		return &Response{Payload: append(req.Payload, '!')}, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.Serve(ctx)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case err := <-serveErr:
+			if err != nil {
+				t.Fatalf("Serve() returned error: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for Serve() shutdown")
+		}
+	}()
+
+	waitForService(t, reg, "svc-noise-warning", 1)
+
+	var logs bytes.Buffer
+	caller, err := New(Config{
+		Name:           "caller-noise-warning",
+		ID:             "caller-noise-warning-1",
+		Registry:       reg,
+		NoisePublicKey: noisePub,
+		Logger:         slog.New(slog.NewJSONHandler(&logs, nil)),
+	})
+	if err != nil {
+		t.Fatalf("New(caller) error = %v", err)
+	}
+	defer caller.Close()
+
+	resp, err := caller.Call("svc-noise-warning", "echo", []byte("ok"))
+	if err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if string(resp.Payload) != "ok!" {
+		t.Fatalf("unexpected response payload: %q", string(resp.Payload))
+	}
+	if !strings.Contains(logs.String(), "No trusted Noise keys configured; accepting any authenticated peer") {
+		t.Fatalf("expected warning log for empty trusted keys, got logs: %s", logs.String())
+	}
+}
+
 func waitForService(t *testing.T, reg *registry.Registry, name string, want int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -1064,6 +1444,78 @@ func testSocketPath(t *testing.T, prefix string) string {
 	path := filepath.Join("/tmp", fmt.Sprintf("nexus-sdk-%s-%d.sock", prefix, time.Now().UnixNano()))
 	t.Cleanup(func() { _ = os.Remove(path) })
 	return path
+}
+
+type failingRegistryBackend struct {
+	registerErr   error
+	registerCalls atomic.Int32
+}
+
+func (b *failingRegistryBackend) Register(registry.ServiceInstance) error {
+	b.registerCalls.Add(1)
+	return b.registerErr
+}
+
+func (b *failingRegistryBackend) Unregister(string) {}
+
+func (b *failingRegistryBackend) Heartbeat(string) bool {
+	return false
+}
+
+func (b *failingRegistryBackend) Lookup(string) []registry.ServiceInstance {
+	return nil
+}
+
+func (b *failingRegistryBackend) Watch(string, func(registry.ChangeEvent)) func() {
+	return func() {}
+}
+
+func (b *failingRegistryBackend) NodeID() string {
+	return "node-test"
+}
+
+func (b *failingRegistryBackend) Close() error {
+	return nil
+}
+
+type heartbeatRegistryBackend struct {
+	mu               sync.Mutex
+	heartbeatResults []bool
+	registerCalls    atomic.Int32
+}
+
+func (b *heartbeatRegistryBackend) Register(registry.ServiceInstance) error {
+	b.registerCalls.Add(1)
+	return nil
+}
+
+func (b *heartbeatRegistryBackend) Unregister(string) {}
+
+func (b *heartbeatRegistryBackend) Heartbeat(string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.heartbeatResults) == 0 {
+		return true
+	}
+	result := b.heartbeatResults[0]
+	b.heartbeatResults = b.heartbeatResults[1:]
+	return result
+}
+
+func (b *heartbeatRegistryBackend) Lookup(string) []registry.ServiceInstance {
+	return nil
+}
+
+func (b *heartbeatRegistryBackend) Watch(string, func(registry.ChangeEvent)) func() {
+	return func() {}
+}
+
+func (b *heartbeatRegistryBackend) NodeID() string {
+	return "node-test"
+}
+
+func (b *heartbeatRegistryBackend) Close() error {
+	return nil
 }
 
 type flakyTransport struct {

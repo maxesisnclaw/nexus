@@ -1,309 +1,264 @@
-# Nexus — 微服务基座框架
+# Nexus — Microservice Foundation
 
-## 概述
+## Overview
 
-Nexus 是一个面向本地多进程微服务架构的通用基座框架，负责进程编排、服务注册发现、和高性能 IPC 通信。框架与业务逻辑完全解耦，可在不同项目间复用。
+Nexus is a Linux-focused microservice foundation for local process orchestration, service registry/discovery, and high-performance IPC.
 
-## 核心目标
+v0.4 adds:
+- Daemon control plane over UDS (`daemon.socket`)
+- Dependency-aware startup ordering (`depends_on`)
+- Probe-based health checks (`health_check`)
+- Noise-encrypted TCP transport
+- CLI subcommands for validation/status/key generation
+- Go SDK API refinement (`Client` -> `Node`)
 
-1. **进程管理**：声明式配置，统一管理所有组件的启动/停止/重启/健康检查
-2. **服务注册中心**：组件启动后注册能力和地址，其他组件按名称/类型发现
-3. **传输抽象层**：统一 API，底层自动选择 UDS（同机）或 TCP（跨机），序列化统一用 msgpack
-4. **零拷贝支持**：同机大数据传输可选 memfd 文件描述符共享
+## Architecture
 
-## 架构
-
-```
-┌──────────────────────────────────────────────┐
-│                  nexusd (守护进程)              │
-│  ┌──────────┐ ┌──────────┐ ┌──────────────┐  │
-│  │ 进程管理  │ │ 注册中心  │ │ 健康检查      │  │
-│  └──────────┘ └──────────┘ └──────────────┘  │
-│                    │                          │
-│         UDS: /run/nexus/registry.sock         │
-└──────────────────────────────────────────────┘
-        ↕                    ↕
-┌──────────┐  ┌──────────┐  ┌──────────┐
-│ 组件 A   │  │ 组件 B   │  │ 组件 C   │
-│ (Go bin) │  │ (Go bin) │  │ (Python) │
-└──────────┘  └──────────┘  └──────────┘
-     ↕ UDS msgpack    ↕ TCP msgpack
-```
-
-## 组件类型
-
-框架对组件一视同仁，但通过配置支持不同的部署模式：
-
-- **singleton**：单实例，只在本机运行一份（适用于 1-4, 7 类）
-- **worker**：可多实例，每个实例接收不同参数/配置（适用于 5, 6 类）
-  - worker 可以运行在本机，也可以运行在远端机器
-
-## 目录结构
-
-```
-nexus/
-├── cmd/
-│   └── nexusd/          # 守护进程入口
-│       └── main.go
-├── pkg/
-│   ├── config/          # 配置解析（TOML）
-│   │   ├── config.go
-│   │   └── types.go
-│   ├── daemon/          # 进程管理 & 生命周期
-│   │   ├── daemon.go
-│   │   ├── process.go
-│   │   └── health.go
-│   ├── registry/        # 服务注册中心
-│   │   ├── registry.go
-│   │   ├── service.go
-│   │   └── discovery.go
-│   ├── transport/       # 传输抽象层
-│   │   ├── transport.go # 统一接口
-│   │   ├── uds.go       # Unix Domain Socket 实现
-│   │   ├── tcp.go       # TCP 实现
-│   │   ├── msgpack.go   # msgpack 编解码
-│   │   └── memfd.go     # memfd 零拷贝（Linux only）
-│   └── sdk/             # 组件集成 SDK
-│       ├── client.go    # Go 组件接入库
-│       └── python/      # Python 适配
-│           └── nexus_sdk.py
-├── nexus.toml           # 示例配置文件
-├── DESIGN.md
-├── AGENTS.md
-└── go.mod
+```text
++--------------------------------------------------------------------------------+
+|                                   nexusd                                       |
+|  +------------------+  +------------------+  +------------------------------+  |
+|  | Process Manager  |  | Service Registry |  | Health Monitor               |  |
+|  | start/stop/retry |  | reg/lookup/watch |  | pid + probe checks           |  |
+|  +------------------+  +------------------+  +------------------------------+  |
+|  +-------------------------------------------------------------------------+   |
+|  | Control Plane (daemon.socket): status/health/register/lookup/watch...   |   |
+|  +-------------------------------------------------------------------------+   |
++-------------------------------+-----------------------------------------------+
+                                |
+              +-----------------+-----------------+
+              |                                   |
+        Local services                        Remote services
+        UDS + msgpack                         TCP + Noise + msgpack
+        optional memfd fd                     encrypted transport
 ```
 
-## 配置格式
+## Configuration
+
+Nexus uses TOML configuration.
+
+### Daemon Fields
 
 ```toml
 [daemon]
-socket = "/run/nexus/registry.sock"
-log_level = "info"
-health_interval = "5s"
-# 注意：daemon.socket / daemon.listen / daemon.peers 当前为预留字段，当前版本 daemon 尚未消费这些跨节点控制面配置。
+socket = "/run/nexus/registry.sock"  # default
+log_level = "info"                    # default: debug|info|warn|error
+health_interval = "5s"                # default
+shutdown_grace = "10s"                # default
+listen = "127.0.0.1:7700"             # optional Noise TCP listener
+noise_key_file = "/etc/nexus/noise.key"
+trusted_keys = ["<hex-public-key>"]    # optional trusted responder keys
+```
 
-# 单实例组件
+Field notes:
+- `socket`: UDS path used by daemon control plane.
+- `listen`: enables TCP listener. Requires `noise_key_file`.
+- `noise_key_file`: static Noise private key file path. If file does not exist, daemon generates one with `0600` mode.
+- `trusted_keys`: trusted peer public keys (hex). Used for Noise trust decisions.
+
+### Service Fields
+
+Common fields:
+
+```toml
 [[service]]
-name = "preprocessor"
-type = "singleton"
-binary = "/opt/app/preprocessor"
-args = ["--config", "/etc/app/preproc.toml"]
+name = "gateway"
+type = "singleton"   # singleton | worker
+runtime = "binary"   # binary | docker
+network = "uds"      # uds | tcp | dual
+args = ["--config", "/etc/nexus/gateway.toml"]
+depends_on = ["auth"]
+health_check = "http://127.0.0.1:8080/healthz"
+```
+
+Binary runtime fields:
+
+```toml
+binary = "/opt/nexus/bin/gateway"
+work_dir = "/opt/nexus"
+env = { LOG_LEVEL = "info", MODE = "prod" }
+```
+
+Docker runtime fields:
+
+```toml
+image = "registry.example.com/postproc:1.2.3"
+env = { APP_MODE = "prod" }
+ports = ["8080:80", "8443:443/tcp"]
+cap_add = ["NET_ADMIN"]
+cap_drop = ["ALL"]
+docker_network = "bridge"
+extra_args = ["--restart", "always"]
+volumes = ["/opt/data:/data"]
+```
+
+### Service Type Enforcement
+
+Validation rules:
+- `type = "singleton"`: `instances` must be empty.
+- `type = "worker"`: `instances` must contain at least one instance.
+- Unknown `type` is rejected.
+- `runtime = "binary"`: `binary` is required and must be absolute path.
+- `runtime = "docker"`: `image` is required.
+- `work_dir` (if set) must be absolute path.
+
+## Control Plane
+
+Daemon control plane is exposed through `daemon.socket` (Unix domain socket).
+
+Protocol:
+- Frame: 4-byte big-endian length prefix + msgpack payload.
+- Max message size: 64 MiB.
+
+Commands:
+
+| Command | Request | Response |
+|---|---|---|
+| `status` | `{cmd:"status"}` | `{services:[{name,id,pid,running}]}` |
+| `health` | `{cmd:"health"}` | `{ok:true, uptime_seconds:n}` |
+| `register` | `{cmd:"register", name, id, endpoints, capabilities, ttl_ms}` | `{ok:true}` |
+| `unregister` | `{cmd:"unregister", id}` | `{ok:true}` |
+| `heartbeat` | `{cmd:"heartbeat", id}` | `{ok:true}` or `{ok:false,error:"instance not found"}` |
+| `lookup` | `{cmd:"lookup", name}` | `{instances:[...]}` |
+| `watch` | `{cmd:"watch", name}` | First `{ok:true}`, then stream events |
+
+Watch streaming behavior:
+- After `watch`, connection stays open.
+- Daemon pushes event frames: `{event:"up|down|...", instance:{...}}`.
+- Multiple `watch` commands can be sent on the same connection.
+- Closing connection unsubscribes all watchers for that session.
+
+## Dependency Management (`depends_on`)
+
+Startup order is resolved before process launch.
+
+Rules:
+- Uses Kahn's algorithm for topological sorting.
+- Missing dependency causes startup error.
+- Dependency cycle causes startup error (cycle path included in error text).
+- For nodes with equal indegree, order remains deterministic using config order.
+
+Example:
+
+```toml
+[[service]]
+name = "gateway"
+
+[[service]]
+name = "auth"
 depends_on = ["gateway"]
-health_check = "tcp://localhost:9001/health"
-# 注意：depends_on 和 health_check 目前为预留字段，当前版本 daemon 不会执行依赖排序或健康探针检查。
 
-# 多实例 worker
 [[service]]
-name = "detector"
-type = "worker"
-binary = "/opt/app/detector"
-instances = [
-  { id = "detector-vehicle", args = ["--config", "vehicle.toml"] },
-  { id = "detector-person", args = ["--config", "person.toml"] },
-]
-network = "dual"  # 同时监听 UDS 和 TCP，支持远端调用
-
-# Python 容器组件
-[[service]]
-name = "legacy-postproc"
-type = "singleton"
-runtime = "docker"
-image = "app/postproc:latest"
-volumes = ["/opt/app/postproc:/app"]
-network = "uds"
-# Nexus 为容器挂载 UDS socket，容器内 Python 通过 nexus_sdk.py 连接
+name = "worker"
+depends_on = ["auth"]
 ```
 
-## 传输抽象层设计
+Resulting startup order: `gateway -> auth -> worker`.
 
-### 统一接口
+## Health Check (`health_check`)
 
-```go
-// Transport 是所有传输实现的统一接口
-type Transport interface {
-    // 客户端：连接到目标服务
-    Dial(ctx context.Context, target ServiceEndpoint) (Conn, error)
-    // 服务端：监听并接受连接
-    Listen(ctx context.Context, addr string) (Listener, error)
-}
+When `health_check` is configured, daemon executes probe checks for each expanded instance.
 
-type Conn interface {
-    // 发送 msgpack 编码的消息
-    Send(msg *Message) error
-    // 接收 msgpack 编码的消息
-    Recv() (*Message, error)
-    // 可选：通过 memfd 发送大数据
-    SendFd(fd int, metadata []byte) error
-    RecvFd() (fd int, metadata []byte, error)
-    Close() error
-}
+Supported probe schemes:
+- `exec://<command ...>`
+- `http://...` (2xx = healthy)
+- `tcp://host:port`
 
-type Message struct {
-    Method  string            `msgpack:"method"`
-    Payload []byte            `msgpack:"payload"`
-    Headers map[string]string `msgpack:"headers,omitempty"`
-}
-```
+Behavior:
+- If probe is configured and probe fails: instance is unhealthy and restart policy is applied.
+- If probe is not configured: fallback to process liveness (PID-alive/running state) check.
 
-### 自动路由
-
-组件调用时只需提供目标服务名，传输层自动决策：
-- 注册中心查询目标地址
-- 同机 → UDS
-- 跨机 → TCP
-- 组件代码无需关心底层传输方式
-
-### memfd 零拷贝
-
-当 `SendFd` 可用时（同机 + Linux）：
-1. 发送方 `memfd_create` 创建匿名内存文件
-2. 写入图像数据
-3. 通过 UDS 的 `SCM_RIGHTS` 传递 fd
-4. 接收方直接 mmap 读取，零拷贝
-
-跨机或不支持时自动 fallback 到普通 msgpack 传输。
-
-## 服务注册中心
-
-### 注册流程
-
-1. 组件启动后连接 nexusd 的 UDS
-2. 发送注册请求：`{ name, id, endpoints: [{type: "uds", addr: "/run/nexus/svc/xxx.sock"}, {type: "tcp", addr: "127.0.0.1:9005"}], capabilities: [...] }`
-3. nexusd 记录并广播变更给所有已注册组件
-4. 组件定期心跳保活
-
-### 发现
-
-- 按名称：`registry.Lookup("detector")` → 返回所有 detector 实例
-- 按能力：`registry.LookupByCapability("detect-vehicle")` → 返回有此能力的实例
-- 变更订阅：`registry.Watch("detector", callback)` → 实例上下线通知
-
-## Go SDK 使用示例
-
-```go
-package main
-
-import "github.com/maxesisn/nexus/pkg/sdk"
-
-func main() {
-    // 初始化 SDK，自动连接本机 nexusd
-    client, _ := sdk.New(sdk.Config{
-        Name: "my-service",
-        Capabilities: []string{"process-image"},
-    })
-    defer client.Close()
-
-    // 注册自己为服务端
-    client.Handle("process", func(req *sdk.Request) (*sdk.Response, error) {
-        // 处理请求
-        return &sdk.Response{Payload: result}, nil
-    })
-
-    // 作为客户端调用其他服务
-    resp, _ := client.Call("detector-vehicle", "detect", payload)
-
-    // 大数据零拷贝（自动判断是否可用）
-    resp, _ = client.CallWithData("detector-vehicle", "detect", imageBytes)
-
-    client.Serve() // 阻塞
-}
-```
-
-## Python SDK 使用示例
-
-```python
-import nexus_sdk
-
-client = nexus_sdk.Client(
-    name="legacy-postproc",
-    socket="/run/nexus/registry.sock"
-)
-
-# 注册处理函数
-@client.handler("postprocess")
-def handle(req):
-    result = do_postprocess(req.payload)
-    return nexus_sdk.Response(payload=result)
-
-# 调用其他服务
-resp = client.call("detector-vehicle", "detect", image_data)
-
-client.serve()
-```
-
-## Python 适配策略
-
-Python 旧组件通过**原生 Python SDK** 接入（不使用 sidecar）：
-- `nexus_sdk.py`：纯 Python 实现，通过 UDS 连接 nexusd
-- 使用 `msgpack` pip 包进行序列化
-- Docker 容器内通过挂载 `/run/nexus/` 目录访问 UDS
-- memfd 在 Python 侧可通过 `os.memfd_create()` (Python 3.8+) 支持
-
-## 跨机器通信
-
-Worker 类型组件需要 `network = "dual"` 配置：
-
-1. 本机 nexusd 启动时，worker 同时监听 UDS 和 TCP
-2. 远端机器运行 nexusd，配置 `peers`（预留，当前版本尚未启用同步逻辑）：
+Examples:
 
 ```toml
-[daemon]
-socket = "/run/nexus/registry.sock"
-
-# 对等节点（远端注册中心）
-[[daemon.peers]]
-addr = "192.168.1.100:7700"  # 主节点
+health_check = "exec:///usr/bin/test -f /tmp/ready"
+health_check = "http://127.0.0.1:8080/healthz"
+health_check = "tcp://127.0.0.1:6379"
 ```
 
-3. 两个 nexusd 互相同步注册信息（规划中，当前版本未实现）
-4. 调用远端 worker 时，传输层自动走 TCP
+## Transport Encryption (Noise)
 
-说明：当前 TCP 传输未内置认证和 TLS。为降低默认暴露风险，非 loopback TCP 监听需要显式设置环境变量 `NEXUS_ALLOW_INSECURE_TCP_LISTEN=1`，并应仅用于可信网络边界内。
+Nexus secures TCP transport with Noise Protocol.
 
-## 目标内核兼容性
+### Handshake Pattern
 
-- 最低 Linux 4.19
-- memfd_create: Linux 3.17+（满足）
-- UDS SCM_RIGHTS: 所有 Linux 版本支持
+- Pattern: `NK`
+- Cipher suite: `Curve25519 + ChaCha20-Poly1305 + SHA256`
+- `NK` authenticates responder/server static key.
 
-## 构建
+### Key Management
+
+- Generate keypair with CLI: `nexusd keygen`.
+- Daemon reads private key from `daemon.noise_key_file`.
+- If file is missing, daemon can generate and persist a new private key (`0600` file mode).
+- Public key is derived from private key and advertised/logged where needed.
+
+### Trust Model
+
+UDS trust model:
+- Trust boundary is local filesystem permissions.
+- Socket directory and socket mode protect local control-plane access.
+
+TCP trust model:
+- Trust is based on Noise responder static key verification.
+- `trusted_keys` can restrict accepted remote responder keys.
+
+### Wire Format
+
+- Control plane over UDS: `4-byte big-endian length + msgpack`.
+- Noise handshake messages: length-prefixed binary frames.
+- Post-handshake data: msgpack envelope encrypted by Noise, sent as length-prefixed frames.
+
+## SDK (Go)
+
+v0.4 SDK updates:
+- `Client` renamed to `Node`.
+- Added `HandleFunc` convenience method.
+- Added `RegistryAddr` for cross-process registry access via daemon control socket.
+
+Example:
+
+```go
+node, err := sdk.New(sdk.Config{
+    Name:         "image-processor",
+    ID:           "image-processor-1",
+    UDSAddr:      "/run/nexus/image-processor.sock",
+    RegistryAddr: "/run/nexus/registry.sock",
+})
+if err != nil {
+    panic(err)
+}
+defer node.Close()
+
+node.HandleFunc("process", func(req *sdk.Request) (*sdk.Response, error) {
+    return &sdk.Response{Payload: req.Payload}, nil
+})
+
+if err := node.Serve(); err != nil {
+    panic(err)
+}
+```
+
+## CLI
+
+`nexusd` supports daemon mode and utility subcommands.
+
+Subcommands:
+- `nexusd validate -config ./nexus.toml`
+  - Parse config and validate dependency graph.
+- `nexusd status -socket /run/nexus/registry.sock`
+  - Query daemon control socket and print service table.
+- `nexusd keygen -out ./nexus.key`
+  - Generate Noise keypair, write private key file, print public key.
+
+## Removed in v0.4
+
+- `daemon.peers` has been removed from active configuration.
+- Peer-sync based registry topology is not part of v0.4 runtime/config schema.
+
+## Build
 
 ```bash
-# 编译 nexusd
-go build -o nexusd ./cmd/nexusd/
-
-# 静态编译（适合分发）
-CGO_ENABLED=0 go build -o nexusd ./cmd/nexusd/
+CGO_ENABLED=0 go build ./...
+go test ./...
 ```
-
-## 开发阶段规划
-
-### Phase 1：核心骨架
-- [x] nexusd 守护进程启动/信号处理
-- [x] 配置解析（TOML）
-- [x] 进程管理（启动/停止/重启）
-- [x] 健康检查（进程存活检测）
-- [ ] `depends_on` / `health_check` 配置生效（规划中，当前未实现）
-
-### Phase 2：传输层
-- [x] UDS transport + msgpack
-- [x] TCP transport + msgpack
-- [x] 统一 Transport 接口
-- [x] 自动路由（同机 UDS / 跨机 TCP）
-
-### Phase 3：服务注册中心
-- [x] 注册/注销/心跳
-- [x] 服务发现（按名称/按能力）
-- [x] 变更通知
-- [ ] 多节点注册信息同步
-
-### Phase 4：高级特性
-- [x] memfd 零拷贝
-- [x] Go SDK
-- [x] Python SDK（minimal/experimental）
-- [ ] Docker 容器组件支持
-
-### Phase 5：CLI & 运维
-- [ ] nexusctl 命令行工具（查看状态、手动操作）
-- [ ] 日志聚合
-- [ ] metrics 导出

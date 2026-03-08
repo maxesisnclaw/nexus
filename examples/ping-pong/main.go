@@ -40,13 +40,13 @@ func main() {
 	go func() { _ = server.Serve(ctx) }()
 	waitForService(reg, "ping", 1)
 
-	client, err := sdk.New(sdk.Config{Name: "caller", ID: "caller-1", Registry: reg})
+	caller, err := sdk.New(sdk.Config{Name: "caller", ID: "caller-1", Registry: reg})
 	if err != nil {
 		panic(err)
 	}
-	defer client.Close()
+	defer caller.Close()
 
-	resp, err := client.Call("ping", "ping", []byte("hello"))
+	resp, err := caller.Call("ping", "ping", []byte("hello"))
 	if err != nil {
 		panic(err)
 	}

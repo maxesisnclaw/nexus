@@ -340,10 +340,24 @@ func TestDiscoveryErrors(t *testing.T) {
 	r := NewWithOptions("node-a", time.Second, 100*time.Millisecond)
 	defer r.Close()
 	d := NewDiscovery(r)
+	d.mu.Lock()
+	d.offset["missing"] = 4
+	d.offset["missing-cap"] = 5
+	d.mu.Unlock()
 	if _, err := d.Pick("missing"); err == nil {
 		t.Fatal("expected Pick error for missing service")
 	}
 	if _, err := d.PickByCapability("missing-cap"); err == nil {
 		t.Fatal("expected PickByCapability error for missing capability")
+	}
+	d.mu.Lock()
+	_, byName := d.offset["missing"]
+	_, byCap := d.offset["missing-cap"]
+	d.mu.Unlock()
+	if byName {
+		t.Fatal("expected stale service offset entry to be removed")
+	}
+	if byCap {
+		t.Fatal("expected stale capability offset entry to be removed")
 	}
 }
