@@ -23,6 +23,8 @@ type Registry struct {
 	watchers map[string]map[int]*watcher
 	nextWID  int
 
+	watcherPanicReporter watcherPanicReporterFunc
+
 	reaperEvery time.Duration
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -44,12 +46,13 @@ func NewWithOptions(nodeID string, ttl time.Duration, reaperEvery time.Duration)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &Registry{
-		nodeID:      nodeID,
-		services:    make(map[string]ServiceInstance),
-		watchers:    make(map[string]map[int]*watcher),
-		reaperEvery: reaperEvery,
-		ctx:         ctx,
-		cancel:      cancel,
+		nodeID:               nodeID,
+		services:             make(map[string]ServiceInstance),
+		watchers:             make(map[string]map[int]*watcher),
+		watcherPanicReporter: defaultWatcherPanicReporter,
+		reaperEvery:          reaperEvery,
+		ctx:                  ctx,
+		cancel:               cancel,
 	}
 	r.wg.Add(1)
 	go r.reapLoop(ttl)

@@ -198,18 +198,14 @@ func TestWatchPanicReportsDiagnostic(t *testing.T) {
 		stack     []byte
 	}
 	reports := make(chan panicReport, 1)
-	prev := loadWatcherPanicReporter()
-	watcherPanicReporter.Store(watcherPanicReporterFunc(func(service string, event ChangeEvent, recovered any, stack []byte) {
+	r.watcherPanicReporter = watcherPanicReporterFunc(func(service string, event ChangeEvent, recovered any, stack []byte) {
 		reports <- panicReport{
 			service:   service,
 			event:     event,
 			recovered: recovered,
 			stack:     append([]byte(nil), stack...),
 		}
-	}))
-	defer func() {
-		watcherPanicReporter.Store(prev)
-	}()
+	})
 
 	r.Watch("svc", func(ChangeEvent) {
 		panic("watcher panic diagnostic")

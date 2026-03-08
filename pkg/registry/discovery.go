@@ -13,6 +13,7 @@ const watcherQueueSize = 64
 type watcher struct {
 	service string
 	cb      func(ChangeEvent)
+	report  watcherPanicReporterFunc
 	events  chan ChangeEvent
 	mu      sync.Mutex
 	closed  bool
@@ -20,12 +21,6 @@ type watcher struct {
 }
 
 type watcherPanicReporterFunc func(service string, event ChangeEvent, recovered any, stack []byte)
-
-var watcherPanicReporter atomic.Value
-
-func init() {
-	watcherPanicReporter.Store(watcherPanicReporterFunc(defaultWatcherPanicReporter))
-}
 
 func defaultWatcherPanicReporter(service string, event ChangeEvent, recovered any, stack []byte) {
 	slog.Default().Error(
@@ -38,15 +33,11 @@ func defaultWatcherPanicReporter(service string, event ChangeEvent, recovered an
 	)
 }
 
-func loadWatcherPanicReporter() watcherPanicReporterFunc {
-	reporter, _ := watcherPanicReporter.Load().(watcherPanicReporterFunc)
-	return reporter
-}
-
-func newWatcher(service string, cb func(ChangeEvent)) *watcher {
+func newWatcher(service string, cb func(ChangeEvent), reporter watcherPanicReporterFunc) *watcher {
 	w := &watcher{
 		service: service,
 		cb:      cb,
+		report:  reporter,
 		events:  make(chan ChangeEvent, watcherQueueSize),
 	}
 	go w.loop()
@@ -61,7 +52,7 @@ func (w *watcher) loop() {
 				if recovered == nil {
 					return
 				}
-				reporter := loadWatcherPanicReporter()
+				reporter := w.report
 				if reporter == nil {
 					return
 				}
@@ -165,7 +156,7 @@ func (r *Registry) Watch(name string, cb func(ChangeEvent)) (unsubscribe func())
 	}
 	id := r.nextWID
 	r.nextWID++
-	w := newWatcher(name, cb)
+	w := newWatcher(name, cb, r.watcherPanicReporter)
 	r.watchers[name][id] = w
 	return func() {
 		r.mu.Lock()
