@@ -20,11 +20,21 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[4]
 
 
-def _wait_for_socket(path: Path, timeout: float = 5.0) -> None:
+def _wait_for_socket(
+    path: Path,
+    proc: subprocess.Popen[str] | None = None,
+    timeout: float = 15.0,
+) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if path.exists():
             return
+        if proc is not None and proc.poll() is not None:
+            stdout, stderr = proc.communicate()
+            raise RuntimeError(
+                "daemon exited before socket was ready "
+                f"(code={proc.returncode})\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            )
         time.sleep(0.02)
     raise TimeoutError(f"socket not ready: {path}")
 
@@ -58,9 +68,23 @@ def _write_config(path: Path, socket_path: Path) -> None:
     )
 
 
-def _start_daemon(config_path: Path) -> subprocess.Popen[str]:
+def _build_go_binary(target: str, output_path: Path) -> None:
+    proc = subprocess.run(
+        ["go", "build", "-o", str(output_path), target],
+        cwd=_repo_root(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"go build {target} failed: {proc.stderr.strip()}")
+
+
+def _start_daemon(daemon_binary: Path, config_path: Path) -> subprocess.Popen[str]:
     proc = subprocess.Popen(
-        ["go", "run", "./cmd/nexusd", "-config", str(config_path)],
+        [str(daemon_binary), "-config", str(config_path)],
         cwd=_repo_root(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -80,10 +104,11 @@ def _stop_daemon(proc: subprocess.Popen[str], timeout: float = 5.0) -> None:
         proc.wait(timeout=timeout)
 
 
-def _go_call_helper_path() -> Path:
+def _build_go_call_helper(work_dir: Path) -> Path:
     repo = _repo_root()
     helper_dir = Path(tempfile.mkdtemp(prefix=".nexus-go-call-", dir=repo))
     helper_path = helper_dir / "main.go"
+    helper_binary = work_dir / "go-call-helper"
     helper_path.write_text(
         textwrap.dedent(
             """
@@ -103,12 +128,12 @@ def _go_call_helper_path() -> Path:
                     os.Exit(2)
                 }
                 node, err := sdk.New(sdk.Config{
-                    Name:         "go-caller",
-                    ID:           "go-caller-1",
-                    RegistryAddr: os.Args[1],
+                    Name:           "go-caller",
+                    ID:             "go-caller-1",
+                    RegistryAddr:   os.Args[1],
                     RequestTimeout: 2 * time.Second,
-                    CallRetries:  4,
-                    RetryBackoff: 50 * time.Millisecond,
+                    CallRetries:    4,
+                    RetryBackoff:   50 * time.Millisecond,
                 })
                 if err != nil {
                     fmt.Fprintf(os.Stderr, "new sdk node: %v\\n", err)
@@ -128,12 +153,26 @@ def _go_call_helper_path() -> Path:
         + "\n",
         encoding="utf-8",
     )
-    return helper_path
+    try:
+        proc = subprocess.run(
+            ["go", "build", "-o", str(helper_binary), str(helper_path)],
+            cwd=repo,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"go build helper failed: {proc.stderr.strip()}")
+    finally:
+        shutil.rmtree(helper_dir, ignore_errors=True)
+    return helper_binary
 
 
-def _run_go_call(helper_path: Path, socket_path: Path, payload: str) -> str:
+def _run_go_call(helper_binary: Path, socket_path: Path, payload: str) -> str:
     proc = subprocess.run(
-        ["go", "run", str(helper_path), str(socket_path), "py-echo", "echo", payload],
+        [str(helper_binary), str(socket_path), "py-echo", "echo", payload],
         cwd=_repo_root(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -162,10 +201,13 @@ def test_python_node_real_daemon_lifecycle_and_go_interop(
     config_path = tmp_path / "nexus.toml"
     _write_config(config_path, socket_path)
 
-    helper_path = _go_call_helper_path()
-    daemon = _start_daemon(config_path)
+    daemon_binary = tmp_path / "nexusd"
+    _build_go_binary("./cmd/nexusd", daemon_binary)
+    helper_binary = _build_go_call_helper(tmp_path)
+
+    daemon = _start_daemon(daemon_binary, config_path)
     try:
-        _wait_for_socket(socket_path)
+        _wait_for_socket(socket_path, daemon)
 
         node = Node(
             name="py-echo",
@@ -179,18 +221,17 @@ def test_python_node_real_daemon_lifecycle_and_go_interop(
         try:
             _wait_for_lookup(str(socket_path), "py-echo")
 
-            first = _run_go_call(helper_path, socket_path, "hello")
+            first = _run_go_call(helper_binary, socket_path, "hello")
             assert first == "hello!"
 
             _stop_daemon(daemon)
-            daemon = _start_daemon(config_path)
-            _wait_for_socket(socket_path)
+            daemon = _start_daemon(daemon_binary, config_path)
+            _wait_for_socket(socket_path, daemon)
 
             _wait_for_lookup(str(socket_path), "py-echo", timeout=8.0)
-            second = _run_go_call(helper_path, socket_path, "again")
+            second = _run_go_call(helper_binary, socket_path, "again")
             assert second == "again!"
         finally:
             node.close()
     finally:
         _stop_daemon(daemon)
-        shutil.rmtree(helper_path.parent, ignore_errors=True)
