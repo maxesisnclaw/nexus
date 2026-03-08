@@ -2,6 +2,8 @@ package registry
 
 import (
 	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 )
@@ -9,6 +11,7 @@ import (
 const watcherQueueSize = 64
 
 type watcher struct {
+	service string
 	cb      func(ChangeEvent)
 	events  chan ChangeEvent
 	mu      sync.Mutex
@@ -16,10 +19,35 @@ type watcher struct {
 	dropped atomic.Int64
 }
 
-func newWatcher(cb func(ChangeEvent)) *watcher {
+type watcherPanicReporterFunc func(service string, event ChangeEvent, recovered any, stack []byte)
+
+var watcherPanicReporter atomic.Value
+
+func init() {
+	watcherPanicReporter.Store(watcherPanicReporterFunc(defaultWatcherPanicReporter))
+}
+
+func defaultWatcherPanicReporter(service string, event ChangeEvent, recovered any, stack []byte) {
+	slog.Default().Error(
+		"registry watcher callback panicked",
+		"service", service,
+		"event_type", event.Type,
+		"instance_id", event.Instance.ID,
+		"panic", fmt.Sprintf("%v", recovered),
+		"stack", string(stack),
+	)
+}
+
+func loadWatcherPanicReporter() watcherPanicReporterFunc {
+	reporter, _ := watcherPanicReporter.Load().(watcherPanicReporterFunc)
+	return reporter
+}
+
+func newWatcher(service string, cb func(ChangeEvent)) *watcher {
 	w := &watcher{
-		cb:     cb,
-		events: make(chan ChangeEvent, watcherQueueSize),
+		service: service,
+		cb:      cb,
+		events:  make(chan ChangeEvent, watcherQueueSize),
 	}
 	go w.loop()
 	return w
@@ -29,7 +57,19 @@ func (w *watcher) loop() {
 	for event := range w.events {
 		func() {
 			defer func() {
-				_ = recover()
+				recovered := recover()
+				if recovered == nil {
+					return
+				}
+				reporter := loadWatcherPanicReporter()
+				if reporter == nil {
+					return
+				}
+				stack := debug.Stack()
+				defer func() {
+					_ = recover()
+				}()
+				reporter(w.service, event, recovered, stack)
 			}()
 			w.cb(event)
 		}()
@@ -125,7 +165,7 @@ func (r *Registry) Watch(name string, cb func(ChangeEvent)) (unsubscribe func())
 	}
 	id := r.nextWID
 	r.nextWID++
-	w := newWatcher(cb)
+	w := newWatcher(name, cb)
 	r.watchers[name][id] = w
 	return func() {
 		r.mu.Lock()

@@ -3,6 +3,7 @@ package registry
 import (
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -183,6 +184,54 @@ func TestWatchPanicDoesNotBreakDelivery(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for non-panicking watcher event")
+	}
+}
+
+func TestWatchPanicReportsDiagnostic(t *testing.T) {
+	r := NewWithOptions("node-a", 200*time.Millisecond, 20*time.Millisecond)
+	defer r.Close()
+
+	type panicReport struct {
+		service   string
+		event     ChangeEvent
+		recovered any
+		stack     []byte
+	}
+	reports := make(chan panicReport, 1)
+	prev := loadWatcherPanicReporter()
+	watcherPanicReporter.Store(watcherPanicReporterFunc(func(service string, event ChangeEvent, recovered any, stack []byte) {
+		reports <- panicReport{
+			service:   service,
+			event:     event,
+			recovered: recovered,
+			stack:     append([]byte(nil), stack...),
+		}
+	}))
+	defer func() {
+		watcherPanicReporter.Store(prev)
+	}()
+
+	r.Watch("svc", func(ChangeEvent) {
+		panic("watcher panic diagnostic")
+	})
+	_ = r.Register(ServiceInstance{Name: "svc", ID: "svc-1"})
+
+	select {
+	case report := <-reports:
+		if report.service != "svc" {
+			t.Fatalf("unexpected service in panic report: %q", report.service)
+		}
+		if report.event.Type != ChangeUp || report.event.Instance.ID != "svc-1" {
+			t.Fatalf("unexpected panic event payload: %+v", report.event)
+		}
+		if !strings.Contains(fmt.Sprint(report.recovered), "watcher panic diagnostic") {
+			t.Fatalf("unexpected recovered panic value: %v", report.recovered)
+		}
+		if len(report.stack) == 0 {
+			t.Fatal("expected panic stack trace in diagnostic report")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for watcher panic diagnostic report")
 	}
 }
 

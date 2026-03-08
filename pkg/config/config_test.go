@@ -278,3 +278,27 @@ binary = "/bin/echo"
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestParseRejectsDuplicateExpandedInstanceIDs(t *testing.T) {
+	data := []byte(`
+[[service]]
+name = "api"
+runtime = "binary"
+binary = "/bin/echo"
+
+[[service]]
+name = "worker"
+type = "worker"
+runtime = "binary"
+binary = "/bin/echo"
+instances = [{ id = "api" }]
+`)
+
+	_, err := Parse(data)
+	if err == nil {
+		t.Fatal("expected duplicate expanded instance ID validation error")
+	}
+	if !strings.Contains(err.Error(), `duplicate expanded instance ID "api"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

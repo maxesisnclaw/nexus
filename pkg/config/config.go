@@ -80,6 +80,7 @@ func validate(cfg *Config) error {
 		return errors.New("daemon.health_interval must be > 0")
 	}
 	seen := make(map[string]struct{}, len(cfg.Services))
+	instanceOwner := make(map[string]string, len(cfg.Services))
 	for _, svc := range cfg.Services {
 		if svc.Name == "" {
 			return errors.New("service.name is required")
@@ -126,8 +127,34 @@ func validate(cfg *Config) error {
 		if !validNetworks[svc.Network] {
 			return fmt.Errorf("service %s network must be uds, tcp, or dual, got %q", svc.Name, svc.Network)
 		}
+		for _, id := range expandedInstanceIDs(svc) {
+			if owner, exists := instanceOwner[id]; exists {
+				return fmt.Errorf(
+					"duplicate expanded instance ID %q for services %q and %q",
+					id,
+					owner,
+					svc.Name,
+				)
+			}
+			instanceOwner[id] = svc.Name
+		}
 	}
 	return nil
+}
+
+func expandedInstanceIDs(svc ServiceSpec) []string {
+	if svc.Type == "worker" && len(svc.Instances) > 0 {
+		ids := make([]string, 0, len(svc.Instances))
+		for i, inst := range svc.Instances {
+			id := inst.ID
+			if id == "" {
+				id = fmt.Sprintf("%s-%d", svc.Name, i)
+			}
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return []string{svc.Name}
 }
 
 func isValidDockerPortMapping(value string) bool {

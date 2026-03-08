@@ -193,6 +193,32 @@ func TestDaemonStartAlreadyStartedAndStopNoop(t *testing.T) {
 	}
 }
 
+func TestDaemonStartAfterStopReturnsExplicitError(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	cfg := &config.Config{
+		Daemon: config.DaemonConfig{
+			HealthInterval: config.Duration{Duration: 100 * time.Millisecond},
+			ShutdownGrace:  config.Duration{Duration: time.Second},
+		},
+	}
+
+	d, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ctx := context.Background()
+	if err := d.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := d.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	err = d.Start(ctx)
+	if !errors.Is(err, ErrDaemonRestartAfterStop) {
+		t.Fatalf("expected ErrDaemonRestartAfterStop, got %v", err)
+	}
+}
+
 func TestDaemonStartFailureResetsState(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	cfg := &config.Config{

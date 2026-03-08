@@ -30,10 +30,18 @@ type Daemon struct {
 
 	mu      sync.Mutex
 	started bool
+	stopped bool
 	cancel  context.CancelFunc
 	done    chan struct{}
 	wg      sync.WaitGroup
 }
+
+var (
+	// ErrDaemonAlreadyStarted indicates Start was called while daemon is already running.
+	ErrDaemonAlreadyStarted = errors.New("daemon already started")
+	// ErrDaemonRestartAfterStop indicates the daemon instance was already stopped and cannot restart.
+	ErrDaemonRestartAfterStop = errors.New("daemon cannot be restarted after Stop")
+)
 
 // New creates a daemon instance.
 func New(cfg *config.Config, logger *slog.Logger) (*Daemon, error) {
@@ -62,7 +70,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.mu.Lock()
 	if d.started {
 		d.mu.Unlock()
-		return errors.New("daemon already started")
+		return ErrDaemonAlreadyStarted
+	}
+	if d.stopped {
+		d.mu.Unlock()
+		return ErrDaemonRestartAfterStop
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	d.cancel = cancel
@@ -140,6 +152,7 @@ func (d *Daemon) Stop() error {
 	}
 	cancel := d.cancel
 	d.started = false
+	d.stopped = true
 	d.cancel = nil
 	d.done = nil
 	d.mu.Unlock()
