@@ -15,7 +15,8 @@ from typing import Callable
 
 from .pool import ConnectionPool
 from .registry import RegistryClient
-from .transport import recv_message, send_message
+from .transport import recv_rpc_message as recv_message
+from .transport import send_rpc_message as send_message
 
 DEFAULT_REGISTRY_ADDR = "/run/nexus/registry.sock"
 _HEARTBEAT_INTERVAL_SECONDS = 5.0

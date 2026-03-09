@@ -9,6 +9,7 @@ import pytest
 import nexus_sdk.node as node_module
 from nexus_sdk.node import Node, Request, Response
 from nexus_sdk.registry import RegistryClient
+from nexus_sdk.transport import recv_rpc_message, send_rpc_message
 
 
 def _wait_for_service(registry_addr: str, name: str, timeout: float = 2.0) -> None:
@@ -42,6 +43,30 @@ def test_node_handle_serve_call_local_uds_roundtrip(
         assert resp.payload == b"hello"
     finally:
         client.close()
+        server.close()
+
+
+def test_node_server_accepts_streamed_msgpack_rpc(
+    mock_registry: object,
+    registry_socket_path: str,
+    socket_path_factory: Any,
+) -> None:
+    uds_path = socket_path_factory("stream.sock")
+    server = Node(name="stream", id="stream-1", uds_addr=uds_path, registry_addr=registry_socket_path)
+    server.handle("echo", lambda req: Response(payload=req.payload))
+    server.serve_async()
+
+    _wait_for_service(registry_socket_path, "stream")
+
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    conn.settimeout(2.0)
+    conn.connect(uds_path)
+    try:
+        send_rpc_message(conn, {"method": "echo", "payload": b"hello", "headers": {}})
+        resp = recv_rpc_message(conn)
+        assert resp["payload"] == b"hello"
+    finally:
+        conn.close()
         server.close()
 
 

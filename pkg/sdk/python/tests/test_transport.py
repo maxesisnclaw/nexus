@@ -11,7 +11,7 @@ from pathlib import Path
 import msgpack
 import pytest
 
-from nexus_sdk.transport import MAX_MESSAGE_SIZE, recv_message, send_message
+from nexus_sdk.transport import MAX_MESSAGE_SIZE, recv_message, recv_rpc_message, send_message, send_rpc_message
 
 
 def test_send_recv_message_round_trip_socketpair() -> None:
@@ -111,3 +111,45 @@ func main() {
 
     got = bytes.fromhex(proc.stdout.strip())
     assert got == expected
+
+
+def test_rpc_stream_round_trip_socketpair() -> None:
+    left, right = socket.socketpair()
+    try:
+        msg = {"method": "echo", "payload": b"hello", "headers": {"trace": "1"}}
+        send_rpc_message(left, msg)
+        got = recv_rpc_message(right)
+        assert got == msg
+    finally:
+        left.close()
+        right.close()
+
+
+def test_rpc_stream_recv_keeps_buffered_bytes_for_reused_socket() -> None:
+    left, right = socket.socketpair()
+    try:
+        first = {"method": "one", "payload": b"a", "headers": {}}
+        second = {"method": "two", "payload": b"b", "headers": {"k": "v"}}
+        body = msgpack.packb(first, use_bin_type=True) + msgpack.packb(second, use_bin_type=True)
+        left.sendall(body)
+
+        assert recv_rpc_message(right) == first
+        assert recv_rpc_message(right) == second
+    finally:
+        left.close()
+        right.close()
+
+
+def test_raw_msgpack_rpc_is_not_framed_control_plane() -> None:
+    left, right = socket.socketpair()
+    try:
+        msg = {"method": "echo", "payload": b"hello", "headers": {}}
+        payload = msgpack.packb(msg, use_bin_type=True)
+        assert struct.unpack(">I", payload[:4])[0] > MAX_MESSAGE_SIZE
+
+        left.sendall(payload)
+        with pytest.raises(ValueError, match="message too large"):
+            recv_message(right)
+    finally:
+        left.close()
+        right.close()
