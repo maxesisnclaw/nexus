@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1](https://github.com/maxesisnclaw/nexus/compare/v1.0.0...v1.0.1) (2026-03-09)
+
+
+### Bug Fixes
+
+* **ci:** fetch full git history for goreleaser to find tags ([2c0007f](https://github.com/maxesisnclaw/nexus/commit/2c0007f1dc96a90938a11d5f9057f621793779a0))
+
 ## 1.0.0 (2026-03-09)
 
 
