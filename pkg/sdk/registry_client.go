@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/maxesisn/nexus/pkg/controlplane"
-	"github.com/maxesisn/nexus/pkg/registry"
+	"github.com/maxesisnclaw/nexus/pkg/controlplane"
+	"github.com/maxesisnclaw/nexus/pkg/registry"
 	"github.com/vmihailenco/msgpack/v5"
 )
 

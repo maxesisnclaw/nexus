@@ -39,7 +39,7 @@ CGO_ENABLED=0 go build ./cmd/nexusd
 package main
 
 import (
-	"github.com/maxesisn/nexus/pkg/sdk"
+	"github.com/maxesisnclaw/nexus/pkg/sdk"
 )
 
 func main() {

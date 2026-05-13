@@ -17,10 +17,10 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/maxesisn/nexus/pkg/config"
-	"github.com/maxesisn/nexus/pkg/controlplane"
-	"github.com/maxesisn/nexus/pkg/daemon"
-	"github.com/maxesisn/nexus/pkg/transport"
+	"github.com/maxesisnclaw/nexus/pkg/config"
+	"github.com/maxesisnclaw/nexus/pkg/controlplane"
+	"github.com/maxesisnclaw/nexus/pkg/daemon"
+	"github.com/maxesisnclaw/nexus/pkg/transport"
 	"github.com/vmihailenco/msgpack/v5"
 )
 

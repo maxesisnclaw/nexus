@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/maxesisn/nexus/pkg/config"
+	"github.com/maxesisnclaw/nexus/pkg/config"
 )
 
 func TestParseHealthProbeExecHTTPAndTCP(t *testing.T) {

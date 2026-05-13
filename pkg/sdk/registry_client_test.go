@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/maxesisn/nexus/pkg/config"
-	"github.com/maxesisn/nexus/pkg/daemon"
-	"github.com/maxesisn/nexus/pkg/registry"
+	"github.com/maxesisnclaw/nexus/pkg/config"
+	"github.com/maxesisnclaw/nexus/pkg/daemon"
+	"github.com/maxesisnclaw/nexus/pkg/registry"
 )
 
 func TestNewUsesRemoteRegistryWhenRegistryAddrSet(t *testing.T) {

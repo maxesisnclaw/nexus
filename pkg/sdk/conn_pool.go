@@ -6,7 +6,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/maxesisn/nexus/pkg/transport"
+	"github.com/maxesisnclaw/nexus/pkg/transport"
 )
 
 const defaultMaxIdlePerEndpoint = 4

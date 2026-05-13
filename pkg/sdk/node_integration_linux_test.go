@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/maxesisn/nexus/pkg/registry"
+	"github.com/maxesisnclaw/nexus/pkg/registry"
 )
 
 func TestIntegrationServeAndCallWithMemfd(t *testing.T) {

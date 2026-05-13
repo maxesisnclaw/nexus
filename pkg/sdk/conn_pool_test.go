@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/maxesisn/nexus/pkg/transport"
+	"github.com/maxesisnclaw/nexus/pkg/transport"
 )
 
 func TestConnectionPoolAcquireCanceledContextKeepsIdleConnection(t *testing.T) {

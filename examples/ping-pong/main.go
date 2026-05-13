@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/maxesisn/nexus/pkg/registry"
-	"github.com/maxesisn/nexus/pkg/sdk"
+	"github.com/maxesisnclaw/nexus/pkg/registry"
+	"github.com/maxesisnclaw/nexus/pkg/sdk"
 )
 
 func main() {

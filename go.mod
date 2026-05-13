@@ -1,4 +1,4 @@
-module github.com/maxesisn/nexus
+module github.com/maxesisnclaw/nexus
 
 go 1.26.1
 

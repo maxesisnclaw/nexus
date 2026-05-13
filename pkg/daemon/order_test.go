@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/maxesisn/nexus/pkg/config"
+	"github.com/maxesisnclaw/nexus/pkg/config"
 )
 
 func TestResolveStartOrderLinearChain(t *testing.T) {

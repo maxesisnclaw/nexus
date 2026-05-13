@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/maxesisn/nexus/pkg/config"
-	"github.com/maxesisn/nexus/pkg/registry"
+	"github.com/maxesisnclaw/nexus/pkg/config"
+	"github.com/maxesisnclaw/nexus/pkg/registry"
 )
 
 // Daemon orchestrates managed services.

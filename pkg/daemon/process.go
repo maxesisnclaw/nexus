@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/maxesisn/nexus/pkg/config"
+	"github.com/maxesisnclaw/nexus/pkg/config"
 )
 
 // ProcessState describes a managed process state snapshot.
