@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3](https://github.com/maxesisnclaw/nexus/compare/v1.0.2...v1.0.3) (2026-05-13)
+
+
+### Bug Fixes
+
+* **transport:** select UDS by socket reachability, not hostname equality ([fd2be7b](https://github.com/maxesisnclaw/nexus/commit/fd2be7b2a070735b88c60c9a3f3bba2a5e568145))
+
 ## [1.0.2](https://github.com/maxesisnclaw/nexus/compare/v1.0.1...v1.0.2) (2026-03-09)
 
 
