@@ -146,6 +146,59 @@ func TestRouterDialSelection(t *testing.T) {
 	}
 }
 
+// TestRouterDialSharedNamespaceUDS verifies that a UDS file reachable in
+// the current mount namespace is dialed via UDS even when Local==false
+// (e.g. caller and callee live in different containers but share a named
+// volume mounted at the same path).
+func TestRouterDialSharedNamespaceUDS(t *testing.T) {
+	// Use /tmp directly: macOS limits UDS sun_path to 104 bytes and
+	// t.TempDir() (under $TMPDIR=/var/folders/...) overflows.
+	dir, err := os.MkdirTemp("/tmp", "nexus-router-ns-")
+	if err != nil {
+		t.Fatalf("mktemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := dir + "/s.sock"
+
+	// create a real listening UDS so os.Stat sees a ModeSocket file
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	uds := &fakeTransport{}
+	tcp := &fakeTransport{}
+	r := NewRouter(uds, tcp)
+
+	// Local:false but UDS file exists -> must pick UDS, not TCP
+	if _, err := r.Dial(context.Background(), ServiceEndpoint{
+		Name: "shared", Local: false, UDSAddr: sock, TCPAddr: "10.0.0.9:9",
+	}); err != nil {
+		t.Fatalf("Dial shared-namespace error = %v", err)
+	}
+	if uds.dials != 1 || tcp.dials != 0 {
+		t.Fatalf("shared namespace: expected UDS dial, got uds=%d tcp=%d", uds.dials, tcp.dials)
+	}
+
+	// UDS path that doesn't exist + TCP available -> falls through to TCP
+	if _, err := r.Dial(context.Background(), ServiceEndpoint{
+		Name: "missing", Local: false, UDSAddr: dir + "/nope.sock", TCPAddr: "10.0.0.10:10",
+	}); err != nil {
+		t.Fatalf("Dial missing-uds-with-tcp error = %v", err)
+	}
+	if uds.dials != 1 || tcp.dials != 1 {
+		t.Fatalf("missing uds: expected TCP fallback, got uds=%d tcp=%d", uds.dials, tcp.dials)
+	}
+
+	// UDS missing AND no TCP -> explanatory error
+	if _, err := r.Dial(context.Background(), ServiceEndpoint{
+		Name: "unreach", Local: false, UDSAddr: dir + "/gone.sock",
+	}); err == nil {
+		t.Fatal("expected unreachable error when UDS missing and no TCP")
+	}
+}
+
 func TestRouterErrors(t *testing.T) {
 	r := NewRouter(nil, nil)
 	if _, err := r.Dial(context.Background(), ServiceEndpoint{Name: "svc"}); err == nil {

@@ -112,7 +112,9 @@ func (p *dialConnectionPool) Close() error {
 }
 
 func endpointPoolKey(endpoint transport.ServiceEndpoint) string {
-	if endpoint.Local && endpoint.UDSAddr != "" {
+	// Pool key must match the transport actually selected by Router.Dial,
+	// otherwise pooled conns become per-key fragments that never get reused.
+	if transport.IsUDSReachable(endpoint) {
 		return "uds:" + endpoint.UDSAddr
 	}
 	if endpoint.TCPAddr != "" {

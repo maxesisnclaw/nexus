@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -71,9 +72,36 @@ func NewRouter(uds, tcp Transport) *Router {
 	return &Router{uds: uds, tcp: tcp}
 }
 
+// IsUDSReachable reports whether the endpoint's UDS path is usable from this
+// process. ep.Local == true is treated as a caller-asserted fast path
+// (used by daemon-local lookups). When Local is false we stat the path: in
+// container deployments that share a UDS via a named volume / bind mount,
+// caller and callee have different hostnames but the same UDS path, and the
+// socket file itself is the source of truth for reachability.
+func IsUDSReachable(ep ServiceEndpoint) bool {
+	if ep.UDSAddr == "" {
+		return false
+	}
+	if ep.Local {
+		return true
+	}
+	info, err := os.Stat(ep.UDSAddr)
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeSocket != 0
+}
+
 // Dial picks the best transport for the endpoint.
+//
+// Selection order:
+//  1. UDS, if the socket file is reachable in this namespace (see
+//     IsUDSReachable). This correctly handles container deployments that
+//     share a UDS via a bind mount / named volume.
+//  2. TCP, if TCPAddr is set.
+//  3. Explanatory error.
 func (r *Router) Dial(ctx context.Context, target ServiceEndpoint) (Conn, error) {
-	if target.Local && target.UDSAddr != "" {
+	if IsUDSReachable(target) {
 		if r.uds == nil {
 			return nil, errors.New("uds transport is not configured")
 		}
@@ -85,14 +113,10 @@ func (r *Router) Dial(ctx context.Context, target ServiceEndpoint) (Conn, error)
 		}
 		return r.tcp.Dial(ctx, target)
 	}
-	if !target.Local {
-		return nil, fmt.Errorf("remote endpoint %s has no TCP address; refusing UDS dial for non-local target", target.Name)
-	}
 	if target.UDSAddr != "" {
-		if r.uds == nil {
-			return nil, errors.New("uds transport is not configured")
-		}
-		return r.uds.Dial(ctx, target)
+		return nil, fmt.Errorf(
+			"endpoint %s: UDS %s not reachable in this namespace and no TCP fallback",
+			target.Name, target.UDSAddr)
 	}
 	return nil, fmt.Errorf("endpoint %s has no usable address", target.Name)
 }
