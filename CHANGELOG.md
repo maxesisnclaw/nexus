@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4](https://github.com/maxesisnclaw/nexus/compare/v1.0.3...v1.0.4) (2026-05-13)
+
+
+### Bug Fixes
+
+* **module:** rename module path to github.com/maxesisnclaw/nexus ([c8643d7](https://github.com/maxesisnclaw/nexus/commit/c8643d72cc10ecf77d8a7763ca129bb275f897d1))
+
 ## [1.0.3](https://github.com/maxesisnclaw/nexus/compare/v1.0.2...v1.0.3) (2026-05-13)
 
 
