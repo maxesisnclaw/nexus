@@ -1,0 +1,5 @@
+[daemon]
+socket = "/run/nexus/registry.sock"
+log_level = "info"
+health_interval = "2s"
+shutdown_grace = "5s"

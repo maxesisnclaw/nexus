@@ -1,0 +1,130 @@
+name: nexus-microservices-compose
+
+# Build contexts are all the repo root so that:
+#   - Dockerfile.nexusd can COPY the nexusd source directly
+#   - services/go/Dockerfile can resolve the `replace github.com/maxesisnclaw/nexus => ../../..`
+#     directive against the in-tree nexus source
+#   - Python service Dockerfiles can reference services/<name>/main.py via
+#     the examples/microservices-compose/... path
+x-nexus-env: &nexus-env
+  NEXUS_REGISTRY: /run/nexus/registry.sock
+
+services:
+  # ---------- nexus daemon ----------
+  nexusd:
+    build:
+      context: ../..
+      dockerfile: examples/microservices-compose/Dockerfile.nexusd
+    command: ["-config", "/etc/nexus/nexus.toml"]
+    volumes:
+      - ./config/nexus.toml:/etc/nexus/nexus.toml:ro
+      - nexus-run:/run/nexus
+    healthcheck:
+      test: ["CMD", "test", "-S", "/run/nexus/registry.sock"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+
+  # ---------- Python services ----------
+  auth:
+    build:
+      context: ../..
+      dockerfile: examples/microservices-compose/services/python.Dockerfile
+      args: { SVC: auth }
+    environment:
+      <<: *nexus-env
+      NEXUS_UDS: /run/nexus/svc/auth.sock
+    volumes:
+      - nexus-run:/run/nexus
+    depends_on:
+      nexusd: { condition: service_healthy }
+
+  catalog:
+    build:
+      context: ../..
+      dockerfile: examples/microservices-compose/services/python.Dockerfile
+      args: { SVC: catalog }
+    environment:
+      <<: *nexus-env
+      NEXUS_UDS: /run/nexus/svc/catalog.sock
+    volumes:
+      - nexus-run:/run/nexus
+    depends_on:
+      nexusd: { condition: service_healthy }
+
+  notifier:
+    build:
+      context: ../..
+      dockerfile: examples/microservices-compose/services/python.Dockerfile
+      args: { SVC: notifier }
+    environment:
+      <<: *nexus-env
+      NEXUS_UDS: /run/nexus/svc/notifier.sock
+    volumes:
+      - nexus-run:/run/nexus
+    depends_on:
+      nexusd: { condition: service_healthy }
+
+  # ---------- Go services ----------
+  orders:
+    build:
+      context: ../..
+      dockerfile: examples/microservices-compose/services/go/Dockerfile
+    command: ["/usr/local/bin/orders"]
+    environment:
+      <<: *nexus-env
+      NEXUS_UDS: /run/nexus/svc/orders.sock
+    volumes:
+      - nexus-run:/run/nexus
+    depends_on:
+      nexusd: { condition: service_healthy }
+
+  payment:
+    build:
+      context: ../..
+      dockerfile: examples/microservices-compose/services/go/Dockerfile
+    command: ["/usr/local/bin/payment"]
+    environment:
+      <<: *nexus-env
+      NEXUS_UDS: /run/nexus/svc/payment.sock
+    volumes:
+      - nexus-run:/run/nexus
+    depends_on:
+      nexusd: { condition: service_healthy }
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: examples/microservices-compose/services/go/Dockerfile
+    command: ["/usr/local/bin/gateway"]
+    environment:
+      <<: *nexus-env
+      HTTP_LISTEN: ":8080"
+    ports:
+      - "18080:8080"
+    volumes:
+      - nexus-run:/run/nexus
+    depends_on:
+      nexusd: { condition: service_healthy }
+
+  # ---------- E2E verifier ----------
+  client:
+    build:
+      context: ../..
+      dockerfile: examples/microservices-compose/client/Dockerfile
+    environment:
+      GATEWAY_URL: http://gateway:8080
+      NEXUS_REGISTRY: /run/nexus/registry.sock
+    volumes:
+      - nexus-run:/run/nexus
+    profiles: ["test"]
+    depends_on:
+      gateway:  { condition: service_started }
+      auth:     { condition: service_started }
+      catalog:  { condition: service_started }
+      orders:   { condition: service_started }
+      payment:  { condition: service_started }
+      notifier: { condition: service_started }
+
+volumes:
+  nexus-run:
